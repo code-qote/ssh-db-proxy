@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"os"
 	"runtime/pprof"
 	"strings"
+	"sync"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sync/errgroup"
@@ -28,7 +31,29 @@ func NewTunnel(config *config.TunnelConfig) (*Tunnel, error) {
 	if config.NoClientAuth {
 		sshConfig.NoClientAuth = true
 	} else {
-		// todo
+		userCABytes, err := os.ReadFile(config.UserCAPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read user CA bundle: %w", err)
+		}
+		userCA, _, _, _, err := ssh.ParseAuthorizedKey(userCABytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse user CA bundle: %w", err)
+		}
+		sshConfig.PublicKeyCallback = func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			switch cert := key.(type) {
+			case *ssh.Certificate:
+				validBefore := time.Unix(int64(cert.ValidBefore), 0)
+				if validBefore.Before(time.Now()) {
+					return nil, fmt.Errorf("certificate has expired")
+				}
+				if subtle.ConstantTimeCompare(userCA.Marshal(), cert.SignatureKey.Marshal()) == 0 {
+					return nil, fmt.Errorf("invalid signature")
+				}
+				return &cert.Permissions, nil
+			default:
+				return nil, fmt.Errorf("received non-certificate key type: %T", key)
+			}
+		}
 	}
 	privateKeyBytes, err := os.ReadFile(config.HostKeyPrivatePath)
 	if err != nil {
@@ -50,7 +75,7 @@ func (t *Tunnel) Serve(ctx context.Context) error {
 	defer listener.Close()
 
 	conns := t.acceptConnections(ctx, listener)
-	wg := errgroup.Group{}
+	var wg sync.WaitGroup
 
 loop:
 	for {
@@ -58,10 +83,16 @@ loop:
 		case <-ctx.Done():
 			break loop
 		case conn := <-conns:
-			wg.Go(func() error { return t.handleConnection(ctx, conn) })
+			go pprof.Do(ctx, pprof.Labels("name", "handle-connection"), func(ctx context.Context) {
+				err := t.handleConnection(ctx, conn)
+				if err != nil {
+					fmt.Println(err)
+				}
+			})
 		}
 	}
-	return handleCloseError(wg.Wait())
+	wg.Wait()
+	return nil
 }
 
 func (t *Tunnel) acceptConnections(ctx context.Context, listener net.Listener) <-chan net.Conn {

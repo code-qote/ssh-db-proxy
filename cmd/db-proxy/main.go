@@ -14,8 +14,9 @@ func main() {
 	conf := &config.TunnelConfig{
 		Host:               "localhost",
 		Port:               "8080",
-		NoClientAuth:       true,
+		NoClientAuth:       false,
 		HostKeyPrivatePath: "/Users/niqote/ssh-db-proxy/dev/hostkey",
+		UserCAPath:         "/Users/niqote/ssh-db-proxy/dev/user_ca.pub",
 	}
 	tun, err := tunnel.NewTunnel(conf)
 	if err != nil {
