@@ -5,28 +5,36 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"runtime/pprof"
-	"strings"
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/sync/errgroup"
 
+	"ssh-db-proxy/internal/mitm"
 	wrapssh "ssh-db-proxy/internal/ssh"
 
 	"ssh-db-proxy/internal/config"
 )
 
+var (
+	ErrAuthError = errors.New("auth error")
+)
+
 type Tunnel struct {
 	c         *config.TunnelConfig
+	logger    *zap.SugaredLogger
 	sshConfig *ssh.ServerConfig
 }
 
-func NewTunnel(config *config.TunnelConfig) (*Tunnel, error) {
+func NewTunnel(config *config.TunnelConfig, logger *zap.SugaredLogger) (*Tunnel, error) {
+	if logger == nil {
+		logger = zap.NewNop().Sugar()
+	}
+
 	sshConfig := &ssh.ServerConfig{}
 	if config.NoClientAuth {
 		sshConfig.NoClientAuth = true
@@ -42,12 +50,21 @@ func NewTunnel(config *config.TunnelConfig) (*Tunnel, error) {
 		sshConfig.PublicKeyCallback = func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			switch cert := key.(type) {
 			case *ssh.Certificate:
+				validAfter := time.Unix(int64(cert.ValidAfter), 0)
 				validBefore := time.Unix(int64(cert.ValidBefore), 0)
+				logger.Infow("tries to auth",
+					"key-id", cert.KeyId,
+					"valid-after", validAfter,
+					"valid-before", validBefore,
+				)
+				if validAfter.After(time.Now()) {
+					return nil, fmt.Errorf("%w: certificate is not active", ErrAuthError)
+				}
 				if validBefore.Before(time.Now()) {
-					return nil, fmt.Errorf("certificate has expired")
+					return nil, fmt.Errorf("%w: certificate has expired", ErrAuthError)
 				}
 				if subtle.ConstantTimeCompare(userCA.Marshal(), cert.SignatureKey.Marshal()) == 0 {
-					return nil, fmt.Errorf("invalid signature")
+					return nil, fmt.Errorf("%w: invalid signature", ErrAuthError)
 				}
 				return &cert.Permissions, nil
 			default:
@@ -64,7 +81,7 @@ func NewTunnel(config *config.TunnelConfig) (*Tunnel, error) {
 		return nil, fmt.Errorf("parse private key: %w", err)
 	}
 	sshConfig.AddHostKey(privateKey)
-	return &Tunnel{c: config, sshConfig: sshConfig}, nil
+	return &Tunnel{c: config, sshConfig: sshConfig, logger: logger}, nil
 }
 
 func (t *Tunnel) Serve(ctx context.Context) error {
@@ -84,9 +101,12 @@ loop:
 			break loop
 		case conn := <-conns:
 			go pprof.Do(ctx, pprof.Labels("name", "handle-connection"), func(ctx context.Context) {
-				err := t.handleConnection(ctx, conn)
-				if err != nil {
-					fmt.Println(err)
+				ctx = context.Background()
+				if err := t.handleConnection(ctx, conn); err != nil {
+					if errors.Is(err, ErrAuthError) {
+						t.logger.Info(err)
+					}
+					t.logger.Error(err)
 				}
 			})
 		}
@@ -119,17 +139,22 @@ func (t *Tunnel) handleConnection(ctx context.Context, conn net.Conn) error {
 
 	go ssh.DiscardRequests(reqs) // todo
 
-	wg := errgroup.Group{}
+	var wg sync.WaitGroup
 	for newChan := range newChans {
 		newChan := newChan
-		wg.Go(func() error {
-			return t.handleChannel(ctx, newChan)
+		wg.Add(1)
+		go pprof.Do(ctx, pprof.Labels("name", "handle-new-channel"), func(ctx context.Context) {
+			err := t.handleChannel(ctx, newChan, conn.LocalAddr(), conn.RemoteAddr())
+			if err != nil {
+				t.logger.Errorf("handle channel: %v", err)
+			}
 		})
 	}
-	return wg.Wait()
+	wg.Wait()
+	return nil
 }
 
-func (t *Tunnel) handleChannel(ctx context.Context, newChan ssh.NewChannel) error {
+func (t *Tunnel) handleChannel(ctx context.Context, newChan ssh.NewChannel, localAddr, remoteAddr net.Addr) error {
 	if newChan.ChannelType() != "direct-tcpip" {
 		if err := newChan.Reject(ssh.UnknownChannelType, "unsupported channel type"); err != nil {
 			return fmt.Errorf("reject channel: %w", err)
@@ -151,47 +176,11 @@ func (t *Tunnel) handleChannel(ctx context.Context, newChan ssh.NewChannel) erro
 
 	go ssh.DiscardRequests(reqs) // todo
 
-	destination, err := net.Dial("tcp", fmt.Sprintf("%s:%d", p.HostToConnect, p.PortToConnect))
-	if err != nil {
-		return fmt.Errorf("dial: %w", err)
-	}
-	defer destination.Close()
+	m := mitm.NewMITM(&forwardChannel{
+		ch:         ch,
+		localAddr:  localAddr,
+		remoteAddr: remoteAddr,
+	}, p.HostToConnect, p.PortToConnect)
 
-	wg, ctx := errgroup.WithContext(ctx)
-	wg.Go(func() error { return proxy(destination, ch) })
-	wg.Go(func() error { return proxy(ch, destination) })
-	<-ctx.Done()
-	return errors.Join(handleCloseError(ch.Close()), handleCloseError(destination.Close()), wg.Wait())
-}
-
-func proxy(dest io.Writer, src io.Reader) error {
-	const bufferSize = 1000
-	buffer := make([]byte, bufferSize)
-	for {
-		n, err := src.Read(buffer)
-		if n > 0 {
-			if _, err := dest.Write(buffer[:n]); err != nil {
-				if errors.Is(err, io.EOF) {
-					return nil
-				}
-				return fmt.Errorf("write to dest: %w", err)
-			}
-		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			return fmt.Errorf("read from src: %w", err)
-		}
-	}
-}
-
-func handleCloseError(err error) error {
-	if err == nil {
-		return nil
-	}
-	if strings.Contains(err.Error(), "use of closed network connection") {
-		return nil
-	}
-	return err
+	return m.Proxy(ctx)
 }
