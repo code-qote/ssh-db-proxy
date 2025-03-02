@@ -3,6 +3,7 @@ package tunnel
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/crypto/ssh"
 
+	"ssh-db-proxy/internal/certissuer"
 	"ssh-db-proxy/internal/mitm"
 	wrapssh "ssh-db-proxy/internal/ssh"
 
@@ -28,12 +30,26 @@ type Tunnel struct {
 	c         *config.TunnelConfig
 	logger    *zap.SugaredLogger
 	sshConfig *ssh.ServerConfig
+
+	certIssuer         *certissuer.CertIssuer
+	databaseCACertPool *x509.CertPool
 }
 
-func NewTunnel(config *config.TunnelConfig, logger *zap.SugaredLogger) (*Tunnel, error) {
+func NewTunnel(config *config.TunnelConfig, mitmConfig *config.MITMConfig, logger *zap.SugaredLogger) (*Tunnel, error) {
 	if logger == nil {
 		logger = zap.NewNop().Sugar()
 	}
+
+	certIssuer, err := certissuer.NewCertIssuer(mitmConfig.ClientCAFilePath, mitmConfig.ClientPrivateKeyPath)
+	if err != nil {
+		return nil, err
+	}
+	certPool := x509.NewCertPool()
+	pems, err := os.ReadFile(mitmConfig.DatabaseCAPath)
+	if err != nil {
+		return nil, err
+	}
+	certPool.AppendCertsFromPEM(pems)
 
 	sshConfig := &ssh.ServerConfig{}
 	if config.NoClientAuth {
@@ -66,6 +82,11 @@ func NewTunnel(config *config.TunnelConfig, logger *zap.SugaredLogger) (*Tunnel,
 				if subtle.ConstantTimeCompare(userCA.Marshal(), cert.SignatureKey.Marshal()) == 0 {
 					return nil, fmt.Errorf("%w: invalid signature", ErrAuthError)
 				}
+				if len(cert.ValidPrincipals) == 0 {
+					return nil, fmt.Errorf("%w: no valid principals", ErrAuthError)
+				}
+				principal := cert.ValidPrincipals[0]
+				cert.Permissions.Extensions["user"] = principal
 				return &cert.Permissions, nil
 			default:
 				return nil, fmt.Errorf("received non-certificate key type: %T", key)
@@ -81,7 +102,7 @@ func NewTunnel(config *config.TunnelConfig, logger *zap.SugaredLogger) (*Tunnel,
 		return nil, fmt.Errorf("parse private key: %w", err)
 	}
 	sshConfig.AddHostKey(privateKey)
-	return &Tunnel{c: config, sshConfig: sshConfig, logger: logger}, nil
+	return &Tunnel{c: config, sshConfig: sshConfig, logger: logger, certIssuer: certIssuer, databaseCACertPool: certPool}, nil
 }
 
 func (t *Tunnel) Serve(ctx context.Context) error {
@@ -137,6 +158,11 @@ func (t *Tunnel) handleConnection(ctx context.Context, conn net.Conn) error {
 	}
 	defer sConn.Close()
 
+	databaseUser, ok := sConn.Permissions.Extensions["user"]
+	if !ok {
+		return fmt.Errorf("missing user permissions")
+	}
+
 	go ssh.DiscardRequests(reqs) // todo
 
 	var wg sync.WaitGroup
@@ -144,7 +170,7 @@ func (t *Tunnel) handleConnection(ctx context.Context, conn net.Conn) error {
 		newChan := newChan
 		wg.Add(1)
 		go pprof.Do(ctx, pprof.Labels("name", "handle-new-channel"), func(ctx context.Context) {
-			err := t.handleChannel(ctx, newChan, conn.LocalAddr(), conn.RemoteAddr())
+			err := t.handleChannel(ctx, databaseUser, newChan, conn.LocalAddr(), conn.RemoteAddr())
 			if err != nil {
 				t.logger.Errorf("handle channel: %v", err)
 			}
@@ -154,7 +180,7 @@ func (t *Tunnel) handleConnection(ctx context.Context, conn net.Conn) error {
 	return nil
 }
 
-func (t *Tunnel) handleChannel(ctx context.Context, newChan ssh.NewChannel, localAddr, remoteAddr net.Addr) error {
+func (t *Tunnel) handleChannel(ctx context.Context, databaseUser string, newChan ssh.NewChannel, localAddr, remoteAddr net.Addr) error {
 	if newChan.ChannelType() != "direct-tcpip" {
 		if err := newChan.Reject(ssh.UnknownChannelType, "unsupported channel type"); err != nil {
 			return fmt.Errorf("reject channel: %w", err)
@@ -176,11 +202,14 @@ func (t *Tunnel) handleChannel(ctx context.Context, newChan ssh.NewChannel, loca
 
 	go ssh.DiscardRequests(reqs) // todo
 
-	m := mitm.NewMITM(&forwardChannel{
+	m, err := mitm.NewMITM(databaseUser, &forwardChannel{
 		ch:         ch,
 		localAddr:  localAddr,
 		remoteAddr: remoteAddr,
-	}, p.HostToConnect, p.PortToConnect)
+	}, p.HostToConnect, p.PortToConnect, t.certIssuer, t.databaseCACertPool)
+	if err != nil {
+		return fmt.Errorf("create MITM: %w", err)
+	}
 
 	return m.Proxy(ctx)
 }

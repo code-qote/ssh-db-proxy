@@ -48,6 +48,7 @@ func main() {
 		}
 	}()
 
+	// sslcert=/Users/niqote/ssh-db-proxy/dev/generated/tls/client.crt&sslkey=/Users/niqote/ssh-db-proxy/dev/generated/tls/client.key&sslrootcert=/Users/niqote/ssh-db-proxy/dev/generated/tls/ca.pem
 	conf := &config.TunnelConfig{
 		Host:               "localhost",
 		Port:               "8080",
@@ -55,7 +56,12 @@ func main() {
 		HostKeyPrivatePath: "/Users/niqote/ssh-db-proxy/dev/generated/ssh_host_rsa_key",
 		UserCAPath:         "/Users/niqote/ssh-db-proxy/dev/generated/user_ca.pub",
 	}
-	tun, err := tunnel.NewTunnel(conf, logger)
+	mitmConf := &config.MITMConfig{
+		ClientCAFilePath:     "/Users/niqote/ssh-db-proxy/dev/generated/tls/proxy-ca.pem",
+		ClientPrivateKeyPath: "/Users/niqote/ssh-db-proxy/dev/generated/tls/proxy-ca.key",
+		DatabaseCAPath:       "/Users/niqote/ssh-db-proxy/dev/generated/tls/ca.pem",
+	}
+	tun, err := tunnel.NewTunnel(conf, mitmConf, logger)
 	if err != nil {
 		panic(err)
 	}
