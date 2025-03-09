@@ -8,14 +8,16 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime/pprof"
+	"slices"
 	"sync/atomic"
 
 	"github.com/jackc/pgconn"
 	"github.com/jackc/pgproto3/v2"
 	"golang.org/x/sync/errgroup"
 
+	"ssh-db-proxy/internal/auditor"
 	"ssh-db-proxy/internal/certissuer"
-	"ssh-db-proxy/internal/recorder"
 )
 
 const (
@@ -25,10 +27,15 @@ const (
 
 var (
 	ErrUserPermissionDenied = errors.New("user permission denied")
+	ErrCancelledRequest     = errors.New("cancelled request")
+	ErrTerminateMessage     = errors.New("terminate message")
 )
 
 type MITM struct {
-	user string
+	connID    string
+	requestID string
+
+	users []string
 
 	backend  *Backend
 	frontend *Frontend
@@ -39,17 +46,22 @@ type MITM struct {
 	certIssuer *certissuer.CertIssuer
 	caCertPool *x509.CertPool
 
+	auditor auditor.Auditor
+
 	isHalfClosed atomic.Bool
 }
 
-func NewMITM(user string, conn net.Conn, targetHost string, targetPort uint32, certIssuer *certissuer.CertIssuer, caCertPool *x509.CertPool) (*MITM, error) {
+func NewMITM(connID, requestID string, users []string, conn net.Conn, targetHost string, targetPort uint32, certIssuer *certissuer.CertIssuer, caCertPool *x509.CertPool, auditor auditor.Auditor) (*MITM, error) {
 	m := &MITM{
-		user:       user,
+		connID:     connID,
+		requestID:  requestID,
+		users:      users,
 		backend:    &Backend{Conn: conn},
 		serverHost: targetHost,
 		serverPort: targetPort,
 		certIssuer: certIssuer,
 		caCertPool: caCertPool,
+		auditor:    auditor,
 	}
 	m.backend.Backend = pgproto3.NewBackend(pgproto3.NewChunkReader(conn), conn)
 	return m, nil
@@ -58,6 +70,9 @@ func NewMITM(user string, conn net.Conn, targetHost string, targetPort uint32, c
 func (m *MITM) Proxy(ctx context.Context) error {
 	parameters, err := m.receiveStartupMessage()
 	if err != nil {
+		if errors.Is(err, ErrCancelledRequest) {
+			return nil
+		}
 		return fmt.Errorf("receive startup message: %w", err)
 	}
 	if err := m.connectToDatabase(ctx, parameters); err != nil {
@@ -73,16 +88,15 @@ func (m *MITM) Proxy(ctx context.Context) error {
 		return fmt.Errorf("prepare client: %w", err)
 	}
 
-	r := &recorder.StdoutRecorder{}
 	wg := errgroup.Group{}
 	wg.Go(func() error {
-		if err := m.proxyClientToServer(r); err != nil {
+		if err := m.proxyClientToServer(); err != nil {
 			return fmt.Errorf("proxy client to server: %w", err)
 		}
 		return nil
 	})
 	wg.Go(func() error {
-		if err := m.proxyServerToClient(r); err != nil {
+		if err := m.proxyServerToClient(); err != nil {
 			return fmt.Errorf("proxy server to client: %w", err)
 		}
 		return nil
@@ -90,7 +104,6 @@ func (m *MITM) Proxy(ctx context.Context) error {
 	if err := wg.Wait(); err != nil && !errors.Is(err, io.EOF) {
 		fmt.Println(err)
 	}
-	r.Save()
 	return nil
 }
 
@@ -123,15 +136,29 @@ func (m *MITM) receiveStartupMessage() (map[string]string, error) {
 		}
 		switch msg := startupMessage.(type) {
 		case *pgproto3.StartupMessage:
+			go pprof.Do(context.Background(), pprof.Labels("name", "on-startup-message-event"), func(ctx context.Context) {
+				m.auditor.OnStartupMessage(m.connID, m.requestID, msg)
+			})
 			return msg.Parameters, nil
 		case *pgproto3.SSLRequest:
+			go pprof.Do(context.Background(), pprof.Labels("name", "on-ssl-request-event"), func(ctx context.Context) {
+				m.auditor.OnSSLRequest(m.connID, m.requestID, msg)
+			})
 			if _, err := m.backend.Write([]byte{notUseSSL}); err != nil {
 				return nil, fmt.Errorf("write SSL request: %w", err)
 			}
 		case *pgproto3.GSSEncRequest:
-			return nil, fmt.Errorf("GSS Enc not implemented")
+			go pprof.Do(context.Background(), pprof.Labels("name", "on-gss-enc-request-event"), func(ctx context.Context) {
+				m.auditor.OnGSSEncRequest(m.connID, m.requestID, msg)
+			})
+			if _, err := m.backend.Write([]byte{notUseSSL}); err != nil {
+				return nil, fmt.Errorf("write SSL request: %w", err)
+			}
 		case *pgproto3.CancelRequest:
-			return nil, fmt.Errorf("Cancel not implemented")
+			go pprof.Do(context.Background(), pprof.Labels("name", "on-cancel-request-event"), func(ctx context.Context) {
+				m.auditor.OnCancelRequest(m.connID, m.requestID, msg)
+			})
+			return nil, ErrCancelledRequest
 		default:
 			return nil, fmt.Errorf("unexpected StartupMessage type: %T", startupMessage)
 		}
@@ -139,22 +166,17 @@ func (m *MITM) receiveStartupMessage() (map[string]string, error) {
 	}
 }
 
-func (m *MITM) proxyClientToServer(r recorder.Recorder) error {
+func (m *MITM) proxyClientToServer() error {
 	for {
 		msg, err := m.backend.Receive()
 		if err != nil {
 			fmt.Println("from client", err)
 			return fmt.Errorf("receive from client: %w", err)
 		}
-		r.WriteFrontendMessage(msg)
-		if isTerminateMessage(msg) {
-			m.isHalfClosed.Store(true)
-			if err := m.frontend.Send(&pgproto3.Terminate{}); err != nil {
-				return err
-			}
-			return nil
-		}
 		if err = m.handleMessage(msg); err != nil {
+			if errors.Is(err, ErrTerminateMessage) {
+				return nil
+			}
 			fmt.Println(err)
 		}
 		if err := m.frontend.Send(msg); err != nil {
@@ -163,12 +185,7 @@ func (m *MITM) proxyClientToServer(r recorder.Recorder) error {
 	}
 }
 
-func isTerminateMessage(msg pgproto3.FrontendMessage) bool {
-	_, ok := msg.(*pgproto3.Terminate)
-	return ok
-}
-
-func (m *MITM) proxyServerToClient(r recorder.Recorder) error {
+func (m *MITM) proxyServerToClient() error {
 	for {
 		msg, err := m.frontend.Receive()
 		if err != nil {
@@ -177,7 +194,6 @@ func (m *MITM) proxyServerToClient(r recorder.Recorder) error {
 			}
 			return fmt.Errorf("receive from server: %w", err)
 		}
-		r.WriteBackendMessage(msg)
 		if isCloseMessage(msg) {
 			return nil
 		}
@@ -195,8 +211,39 @@ func isCloseMessage(msg pgproto3.BackendMessage) bool {
 func (m *MITM) handleMessage(msg pgproto3.FrontendMessage) error {
 	switch msg := msg.(type) {
 	case *pgproto3.Parse:
-		fmt.Println(msg.Name, msg.Query, msg.ParameterOIDs)
+		go pprof.Do(context.Background(), pprof.Labels("name", "on-parse-message-event"), func(ctx context.Context) {
+			m.auditor.OnParseMessage(m.connID, m.requestID, msg)
+		})
 		return nil
+	case *pgproto3.Bind:
+		go pprof.Do(context.Background(), pprof.Labels("name", "on-parse-message-event"), func(ctx context.Context) {
+			m.auditor.OnBindMessage(m.connID, m.requestID, msg)
+		})
+		return nil
+	case *pgproto3.Sync:
+		go pprof.Do(context.Background(), pprof.Labels("name", "on-sync-message-event"), func(ctx context.Context) {
+			m.auditor.OnSyncMessage(m.connID, m.requestID, msg)
+		})
+		return nil
+	case *pgproto3.Execute:
+		go pprof.Do(context.Background(), pprof.Labels("name", "on-execute-message-event"), func(ctx context.Context) {
+			m.auditor.OnExecuteMessage(m.connID, m.requestID, msg)
+		})
+		return nil
+	case *pgproto3.Describe:
+		go pprof.Do(context.Background(), pprof.Labels("name", "on-describe-message-event"), func(ctx context.Context) {
+			m.auditor.OnDescribeMessage(m.connID, m.requestID, msg)
+		})
+		return nil
+	case *pgproto3.Terminate:
+		go pprof.Do(context.Background(), pprof.Labels("name", "on-terminate-message-event"), func(ctx context.Context) {
+			m.auditor.OnTerminateMessage(m.connID, m.requestID, msg)
+		})
+		m.isHalfClosed.Store(true)
+		if err := m.frontend.Send(&pgproto3.Terminate{}); err != nil {
+			return err
+		}
+		return ErrTerminateMessage
 	default:
 		return fmt.Errorf("unexpected Frontend message: %T", msg)
 	}
@@ -211,16 +258,23 @@ func (m *MITM) connectToDatabase(ctx context.Context, frontendParameters map[str
 		return fmt.Errorf("user not found in frontend parameters")
 	}
 
-	if m.user != user {
-		return fmt.Errorf("%w: username to connect and username from certificate are not equal", ErrUserPermissionDenied)
-	}
-
 	database, ok := frontendParameters["database"]
 	if !ok {
 		return fmt.Errorf("database not found in frontend parameters")
 	}
 
-	cert, err := m.certIssuer.Issue(m.user)
+	var authError error
+	if !slices.Contains(m.users, user) {
+		authError = fmt.Errorf("%w: forbidden username", ErrUserPermissionDenied)
+	}
+	go pprof.Do(context.Background(), pprof.Labels("name", "on-database-auth"), func(ctx context.Context) {
+		m.auditor.OnDatabaseAuth(m.connID, m.requestID, user, m.serverHost, database, m.serverPort, authError)
+	})
+	if authError != nil {
+		return authError
+	}
+
+	cert, err := m.certIssuer.Issue(user)
 	if err != nil {
 		return fmt.Errorf("issue certificate: %w", err)
 	}

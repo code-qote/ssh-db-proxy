@@ -3,6 +3,7 @@ module ssh-db-proxy
 go 1.23.4
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/jackc/pgconn v1.14.3
 	github.com/jackc/pgproto3/v2 v2.3.3
 	github.com/stretchr/testify v1.8.1

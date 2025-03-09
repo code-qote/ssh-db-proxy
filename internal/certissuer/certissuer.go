@@ -61,7 +61,7 @@ func (c *CertIssuer) Issue(commonName string) (tls.Certificate, error) {
 			CommonName:   commonName,
 		},
 		NotBefore:   now,
-		NotAfter:    now.Add(1 * time.Minute),
+		NotAfter:    now.Add(10 * time.Minute),
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
 	certPKey, err := rsa.GenerateKey(rand.Reader, 4096)

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -9,8 +11,9 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
+	"ssh-db-proxy/internal/auditor"
 	"ssh-db-proxy/internal/config"
-	"ssh-db-proxy/internal/tunnel"
+	"ssh-db-proxy/internal/database-proxy"
 )
 
 func initLogger() *zap.SugaredLogger {
@@ -48,20 +51,25 @@ func main() {
 		}
 	}()
 
-	// sslcert=/Users/niqote/ssh-db-proxy/dev/generated/tls/client.crt&sslkey=/Users/niqote/ssh-db-proxy/dev/generated/tls/client.key&sslrootcert=/Users/niqote/ssh-db-proxy/dev/generated/tls/ca.pem
-	conf := &config.TunnelConfig{
+	conf := &config.Config{
 		Host:               "localhost",
 		Port:               "8080",
 		NoClientAuth:       false,
 		HostKeyPrivatePath: "/Users/niqote/ssh-db-proxy/dev/generated/ssh_host_rsa_key",
 		UserCAPath:         "/Users/niqote/ssh-db-proxy/dev/generated/user_ca.pub",
+		MITMConfig: config.MITMConfig{
+			ClientCAFilePath:     "/Users/niqote/ssh-db-proxy/dev/generated/tls/proxy-ca.pem",
+			ClientPrivateKeyPath: "/Users/niqote/ssh-db-proxy/dev/generated/tls/proxy-ca.key",
+			DatabaseCAPath:       "/Users/niqote/ssh-db-proxy/dev/generated/tls/ca.pem",
+		},
 	}
-	mitmConf := &config.MITMConfig{
-		ClientCAFilePath:     "/Users/niqote/ssh-db-proxy/dev/generated/tls/proxy-ca.pem",
-		ClientPrivateKeyPath: "/Users/niqote/ssh-db-proxy/dev/generated/tls/proxy-ca.key",
-		DatabaseCAPath:       "/Users/niqote/ssh-db-proxy/dev/generated/tls/ca.pem",
-	}
-	tun, err := tunnel.NewTunnel(conf, mitmConf, logger)
+	auditor := auditor.NewDefaultAuditor(func(audit *auditor.DefaultConnectionAudit) {
+		b, err := json.Marshal(audit)
+		if err == nil {
+			os.WriteFile(fmt.Sprintf("/Users/niqote/ssh-db-proxy/dev/generated/audits/%s.json", audit.ID), b, 0644)
+		}
+	})
+	proxy, err := database_proxy.NewDatabaseProxy(conf, auditor, logger)
 	if err != nil {
 		panic(err)
 	}
@@ -70,7 +78,7 @@ func main() {
 	defer stop()
 
 	logger.Infof("tunnel serves...")
-	if err := tun.Serve(ctx); err != nil {
+	if err := proxy.Serve(ctx); err != nil {
 		logger.Error(err)
 	}
 }
