@@ -68,43 +68,47 @@ func (a *DefaultAuditor) OnDirectTCPIPRequest(connID, requestID string) {
 	a.mu.Unlock()
 }
 
-func (a *DefaultAuditor) OnParseMessage(connID, requestID string, msg *pgproto3.Parse) {
+func (a *DefaultAuditor) OnQueryMessage(connID, requestID string, msg pgproto3.Query) {
 	a.appendMessage(connID, requestID, msg)
 }
 
-func (a *DefaultAuditor) OnBindMessage(connID, requestID string, msg *pgproto3.Bind) {
+func (a *DefaultAuditor) OnParseMessage(connID, requestID string, msg pgproto3.Parse) {
 	a.appendMessage(connID, requestID, msg)
 }
 
-func (a *DefaultAuditor) OnSyncMessage(connID, requestID string, msg *pgproto3.Sync) {
+func (a *DefaultAuditor) OnBindMessage(connID, requestID string, msg pgproto3.Bind) {
 	a.appendMessage(connID, requestID, msg)
 }
 
-func (a *DefaultAuditor) OnExecuteMessage(connID, requestID string, msg *pgproto3.Execute) {
+func (a *DefaultAuditor) OnSyncMessage(connID, requestID string, msg pgproto3.Sync) {
 	a.appendMessage(connID, requestID, msg)
 }
 
-func (a *DefaultAuditor) OnDescribeMessage(connID, requestID string, msg *pgproto3.Describe) {
+func (a *DefaultAuditor) OnExecuteMessage(connID, requestID string, msg pgproto3.Execute) {
 	a.appendMessage(connID, requestID, msg)
 }
 
-func (a *DefaultAuditor) OnTerminateMessage(connID, requestID string, msg *pgproto3.Terminate) {
+func (a *DefaultAuditor) OnDescribeMessage(connID, requestID string, msg pgproto3.Describe) {
 	a.appendMessage(connID, requestID, msg)
 }
 
-func (a *DefaultAuditor) OnStartupMessage(connID, requestID string, msg *pgproto3.StartupMessage) {
+func (a *DefaultAuditor) OnTerminateMessage(connID, requestID string, msg pgproto3.Terminate) {
 	a.appendMessage(connID, requestID, msg)
 }
 
-func (a *DefaultAuditor) OnSSLRequest(connID, requestID string, msg *pgproto3.SSLRequest) {
+func (a *DefaultAuditor) OnStartupMessage(connID, requestID string, msg pgproto3.StartupMessage) {
 	a.appendMessage(connID, requestID, msg)
 }
 
-func (a *DefaultAuditor) OnGSSEncRequest(connID, requestID string, msg *pgproto3.GSSEncRequest) {
+func (a *DefaultAuditor) OnSSLRequest(connID, requestID string, msg pgproto3.SSLRequest) {
 	a.appendMessage(connID, requestID, msg)
 }
 
-func (a *DefaultAuditor) OnCancelRequest(connID, requestID string, msg *pgproto3.CancelRequest) {
+func (a *DefaultAuditor) OnGSSEncRequest(connID, requestID string, msg pgproto3.GSSEncRequest) {
+	a.appendMessage(connID, requestID, msg)
+}
+
+func (a *DefaultAuditor) OnCancelRequest(connID, requestID string, msg pgproto3.CancelRequest) {
 	a.appendMessage(connID, requestID, msg)
 }
 
