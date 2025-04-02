@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
+	"ssh-db-proxy/internal/abac"
 	"ssh-db-proxy/internal/auditor"
 	"ssh-db-proxy/internal/config"
 	"ssh-db-proxy/internal/database-proxy"
@@ -57,10 +58,27 @@ func main() {
 		NoClientAuth:       false,
 		HostKeyPrivatePath: "/Users/niqote/ssh-db-proxy/dev/generated/ssh_host_rsa_key",
 		UserCAPath:         "/Users/niqote/ssh-db-proxy/dev/generated/user_ca.pub",
-		MITMConfig: config.MITMConfig{
+		MITM: config.MITMConfig{
 			ClientCAFilePath:     "/Users/niqote/ssh-db-proxy/dev/generated/tls/proxy-ca.pem",
 			ClientPrivateKeyPath: "/Users/niqote/ssh-db-proxy/dev/generated/tls/proxy-ca.key",
 			DatabaseCAPath:       "/Users/niqote/ssh-db-proxy/dev/generated/tls/ca.pem",
+		},
+		ABACRules: map[string]*abac.Rule{
+			"night-time": {
+				Conditions: []abac.Condition{
+					&abac.TimeCondition{
+						Location: "Europe/Moscow",
+						Hour:     []abac.Interval{{From: 0, To: 9}, {From: 20, To: 23}},
+					},
+				},
+				Actions: abac.Notify,
+			},
+			"blocked-users": {
+				Conditions: []abac.Condition{
+					&abac.DatabaseUsernameCondition{Regexps: []string{"not_niqote"}},
+				},
+				Actions: abac.Notify | abac.NotPermit,
+			},
 		},
 	}
 	auditor := auditor.NewDefaultAuditor(func(audit *auditor.DefaultConnectionAudit) {

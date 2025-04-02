@@ -14,10 +14,13 @@ import (
 
 	"github.com/jackc/pgconn"
 	"github.com/jackc/pgproto3/v2"
+	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 
+	"ssh-db-proxy/internal/abac"
 	"ssh-db-proxy/internal/auditor"
 	"ssh-db-proxy/internal/certissuer"
+	"ssh-db-proxy/internal/metadata"
 )
 
 const (
@@ -27,13 +30,13 @@ const (
 
 var (
 	ErrUserPermissionDenied = errors.New("user permission denied")
+	ErrDisconnectUser       = errors.New("disconnect user")
 	ErrCancelledRequest     = errors.New("cancelled request")
 	ErrTerminateMessage     = errors.New("terminate message")
 )
 
 type MITM struct {
-	connID    string
-	requestID string
+	metadata metadata.Metadata
 
 	users []string
 
@@ -47,14 +50,16 @@ type MITM struct {
 	caCertPool *x509.CertPool
 
 	auditor auditor.Auditor
+	abac    *abac.ABAC
+
+	logger *zap.SugaredLogger
 
 	isHalfClosed atomic.Bool
 }
 
-func NewMITM(connID, requestID string, users []string, conn net.Conn, targetHost string, targetPort uint32, certIssuer *certissuer.CertIssuer, caCertPool *x509.CertPool, auditor auditor.Auditor) (*MITM, error) {
+func NewMITM(metadata metadata.Metadata, users []string, conn net.Conn, targetHost string, targetPort uint32, certIssuer *certissuer.CertIssuer, caCertPool *x509.CertPool, auditor auditor.Auditor, abac *abac.ABAC, logger *zap.SugaredLogger) (*MITM, error) {
 	m := &MITM{
-		connID:     connID,
-		requestID:  requestID,
+		metadata:   metadata,
 		users:      users,
 		backend:    &Backend{Conn: conn},
 		serverHost: targetHost,
@@ -62,6 +67,7 @@ func NewMITM(connID, requestID string, users []string, conn net.Conn, targetHost
 		certIssuer: certIssuer,
 		caCertPool: caCertPool,
 		auditor:    auditor,
+		abac:       abac,
 	}
 	m.backend.Backend = pgproto3.NewBackend(pgproto3.NewChunkReader(conn), conn)
 	return m, nil
@@ -76,9 +82,12 @@ func (m *MITM) Proxy(ctx context.Context) error {
 		return fmt.Errorf("receive startup message: %w", err)
 	}
 	if err := m.connectToDatabase(ctx, parameters); err != nil {
-		if errors.Is(err, ErrUserPermissionDenied) {
+		if errors.Is(err, ErrUserPermissionDenied) || errors.Is(err, ErrDisconnectUser) {
 			if err := m.backend.Send(&pgproto3.ErrorResponse{Code: "403", Message: "Permission Denied"}); err != nil {
 				return fmt.Errorf("send permission denied message: %w", err)
+			}
+			if errors.Is(err, ErrDisconnectUser) {
+				return err
 			}
 			return nil
 		}
@@ -138,13 +147,13 @@ func (m *MITM) receiveStartupMessage() (map[string]string, error) {
 		case *pgproto3.StartupMessage:
 			msgV := *msg
 			go pprof.Do(context.Background(), pprof.Labels("name", "on-startup-message-event"), func(ctx context.Context) {
-				m.auditor.OnStartupMessage(m.connID, m.requestID, msgV)
+				m.auditor.OnStartupMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
 			})
 			return msg.Parameters, nil
 		case *pgproto3.SSLRequest:
 			msgV := *msg
 			go pprof.Do(context.Background(), pprof.Labels("name", "on-ssl-request-event"), func(ctx context.Context) {
-				m.auditor.OnSSLRequest(m.connID, m.requestID, msgV)
+				m.auditor.OnSSLRequest(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
 			})
 			if _, err := m.backend.Write([]byte{notUseSSL}); err != nil {
 				return nil, fmt.Errorf("write SSL request: %w", err)
@@ -152,7 +161,7 @@ func (m *MITM) receiveStartupMessage() (map[string]string, error) {
 		case *pgproto3.GSSEncRequest:
 			msgV := *msg
 			go pprof.Do(context.Background(), pprof.Labels("name", "on-gss-enc-request-event"), func(ctx context.Context) {
-				m.auditor.OnGSSEncRequest(m.connID, m.requestID, msgV)
+				m.auditor.OnGSSEncRequest(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
 			})
 			if _, err := m.backend.Write([]byte{notUseSSL}); err != nil {
 				return nil, fmt.Errorf("write SSL request: %w", err)
@@ -160,7 +169,7 @@ func (m *MITM) receiveStartupMessage() (map[string]string, error) {
 		case *pgproto3.CancelRequest:
 			msgV := *msg
 			go pprof.Do(context.Background(), pprof.Labels("name", "on-cancel-request-event"), func(ctx context.Context) {
-				m.auditor.OnCancelRequest(m.connID, m.requestID, msgV)
+				m.auditor.OnCancelRequest(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
 			})
 			return nil, ErrCancelledRequest
 		default:
@@ -178,7 +187,6 @@ func (m *MITM) proxyClientToServer() error {
 	for {
 		msg, err := m.backend.Receive()
 		if err != nil {
-			fmt.Println("from client", err)
 			m.isHalfClosed.Store(true)
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				return nil
@@ -229,43 +237,43 @@ func (m *MITM) handleMessage(msg pgproto3.FrontendMessage) error {
 	case *pgproto3.Query:
 		msgV := *msg
 		go pprof.Do(context.Background(), pprof.Labels("name", "on-query-message-event"), func(ctx context.Context) {
-			m.auditor.OnQueryMessage(m.connID, m.requestID, msgV)
+			m.auditor.OnQueryMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
 		})
 		return nil
 	case *pgproto3.Parse:
 		msgV := *msg
 		go pprof.Do(context.Background(), pprof.Labels("name", "on-parse-message-event"), func(ctx context.Context) {
-			m.auditor.OnParseMessage(m.connID, m.requestID, msgV)
+			m.auditor.OnParseMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
 		})
 		return nil
 	case *pgproto3.Bind:
 		msgV := *msg
 		go pprof.Do(context.Background(), pprof.Labels("name", "on-parse-message-event"), func(ctx context.Context) {
-			m.auditor.OnBindMessage(m.connID, m.requestID, msgV)
+			m.auditor.OnBindMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
 		})
 		return nil
 	case *pgproto3.Sync:
 		msgV := *msg
 		go pprof.Do(context.Background(), pprof.Labels("name", "on-sync-message-event"), func(ctx context.Context) {
-			m.auditor.OnSyncMessage(m.connID, m.requestID, msgV)
+			m.auditor.OnSyncMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
 		})
 		return nil
 	case *pgproto3.Execute:
 		msgV := *msg
 		go pprof.Do(context.Background(), pprof.Labels("name", "on-execute-message-event"), func(ctx context.Context) {
-			m.auditor.OnExecuteMessage(m.connID, m.requestID, msgV)
+			m.auditor.OnExecuteMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
 		})
 		return nil
 	case *pgproto3.Describe:
 		msgV := *msg
 		go pprof.Do(context.Background(), pprof.Labels("name", "on-describe-message-event"), func(ctx context.Context) {
-			m.auditor.OnDescribeMessage(m.connID, m.requestID, msgV)
+			m.auditor.OnDescribeMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
 		})
 		return nil
 	case *pgproto3.Terminate:
 		msgV := *msg
 		go pprof.Do(context.Background(), pprof.Labels("name", "on-terminate-message-event"), func(ctx context.Context) {
-			m.auditor.OnTerminateMessage(m.connID, m.requestID, msgV)
+			m.auditor.OnTerminateMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
 		})
 		if err := m.frontend.Send(&pgproto3.Terminate{}); err != nil {
 			return err
@@ -295,10 +303,31 @@ func (m *MITM) connectToDatabase(ctx context.Context, frontendParameters map[str
 		authError = fmt.Errorf("%w: forbidden username", ErrUserPermissionDenied)
 	}
 	go pprof.Do(context.Background(), pprof.Labels("name", "on-database-auth"), func(ctx context.Context) {
-		m.auditor.OnDatabaseAuth(m.connID, m.requestID, user, m.serverHost, database, m.serverPort, authError)
+		m.auditor.OnDatabaseAuth(m.metadata.ConnectionID, m.metadata.RequestID, user, m.serverHost, database, m.serverPort, authError)
 	})
 	if authError != nil {
 		return authError
+	}
+
+	actions, err := m.abac.Observe(m.metadata.StateID, abac.DatabaseNameEvent(database), abac.DatabaseUsernameEvent(user))
+	if err == nil {
+		if actions&abac.Notify > 0 {
+			m.auditor.OnNotify(fmt.Sprintf("user %s connecting to %s", user, database), m.metadata)
+		}
+		if actions&abac.Disconnect > 0 {
+			if actions&abac.Notify > 0 {
+				m.auditor.OnNotify(fmt.Sprintf("user %s was not permitted to connect to %s and disconnected", user, database), m.metadata)
+			}
+			return fmt.Errorf("%w: forbidden username by administrator", ErrDisconnectUser)
+		}
+		if actions&abac.NotPermit > 0 || actions&abac.Disconnect > 0 {
+			if actions&abac.Notify > 0 {
+				m.auditor.OnNotify(fmt.Sprintf("user %s was not permitted to connect to %s", user, database), m.metadata)
+			}
+			return fmt.Errorf("%w: forbidden username by administrator", ErrUserPermissionDenied)
+		}
+	} else {
+		m.logger.Errorw("failed to observe", "state-id", m.metadata.StateID, "err", err)
 	}
 
 	cert, err := m.certIssuer.Issue(user)

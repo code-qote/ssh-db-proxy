@@ -2,10 +2,14 @@ package auditor
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgproto3/v2"
 	"golang.org/x/crypto/ssh"
+
+	"ssh-db-proxy/internal/metadata"
 )
 
 type DefaultRequestAudit struct {
@@ -66,6 +70,37 @@ func (a *DefaultAuditor) OnDirectTCPIPRequest(connID, requestID string) {
 		connection.Requests[requestID] = &DefaultRequestAudit{ID: requestID}
 	}
 	a.mu.Unlock()
+}
+
+type event struct {
+	Time     time.Time         `json:"time"`
+	Message  string            `json:"message"`
+	Metadata metadata.Metadata `json:"metadata"`
+}
+
+func (e *event) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Time     time.Time         `json:"time"`
+		Message  string            `json:"message"`
+		Metadata metadata.Metadata `json:"metadata"`
+	}{
+		Time:     e.Time,
+		Message:  e.Message,
+		Metadata: e.Metadata,
+	})
+}
+
+func (a *DefaultAuditor) OnNotify(message string, data metadata.Metadata) {
+	e := &event{
+		Time:     time.Now(),
+		Message:  message,
+		Metadata: data,
+	}
+	d, err := e.MarshalJSON()
+	if err == nil {
+		fmt.Println(string(d))
+	}
+	a.appendMessage(data.ConnectionID, data.RequestID, e)
 }
 
 func (a *DefaultAuditor) OnQueryMessage(connID, requestID string, msg pgproto3.Query) {

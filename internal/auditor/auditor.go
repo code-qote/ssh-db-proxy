@@ -3,10 +3,13 @@ package auditor
 import (
 	"github.com/jackc/pgproto3/v2"
 	"golang.org/x/crypto/ssh"
+
+	"ssh-db-proxy/internal/metadata"
 )
 
 type Auditor interface {
 	OnConnectionAccept(connID, localAddress, remoteAddress string)
+	OnNotify(message string, data metadata.Metadata)
 	OnAuthCertificate(cert *ssh.Certificate)
 	OnDatabaseUsers(connID string, users []string)
 	OnDirectTCPIPRequest(connID, requestID string)

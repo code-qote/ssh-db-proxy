@@ -17,8 +17,10 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/crypto/ssh"
 
+	"ssh-db-proxy/internal/abac"
 	"ssh-db-proxy/internal/auditor"
 	"ssh-db-proxy/internal/certissuer"
+	"ssh-db-proxy/internal/metadata"
 	"ssh-db-proxy/internal/mitm"
 	wrapssh "ssh-db-proxy/internal/ssh"
 
@@ -35,14 +37,15 @@ type DatabaseProxy struct {
 	sshConfig *ssh.ServerConfig
 
 	auditor auditor.Auditor
+	abac    *abac.ABAC
 
 	certIssuer         *certissuer.CertIssuer
 	databaseCACertPool *x509.CertPool
 }
 
-type ConnWithId struct {
-	ID   string
-	Conn net.Conn
+type ConnWithMetadata struct {
+	Conn     net.Conn
+	Metadata metadata.Metadata
 }
 
 func NewDatabaseProxy(config *config.Config, auditor auditor.Auditor, logger *zap.SugaredLogger) (*DatabaseProxy, error) {
@@ -50,7 +53,7 @@ func NewDatabaseProxy(config *config.Config, auditor auditor.Auditor, logger *za
 		logger = zap.NewNop().Sugar()
 	}
 
-	mitmConfig := config.MITMConfig
+	mitmConfig := config.MITM
 	certIssuer, err := certissuer.NewCertIssuer(mitmConfig.ClientCAFilePath, mitmConfig.ClientPrivateKeyPath)
 	if err != nil {
 		return nil, err
@@ -115,11 +118,18 @@ func NewDatabaseProxy(config *config.Config, auditor auditor.Auditor, logger *za
 		return nil, fmt.Errorf("parse private key: %w", err)
 	}
 	sshConfig.AddHostKey(privateKey)
+
+	a, err := abac.New(config.ABACRules)
+	if err != nil {
+		return nil, fmt.Errorf("create abac: %w", err)
+	}
+
 	return &DatabaseProxy{
 		c:                  config,
 		sshConfig:          sshConfig,
 		logger:             logger,
 		auditor:            auditor,
+		abac:               a,
 		certIssuer:         certIssuer,
 		databaseCACertPool: certPool}, nil
 }
@@ -157,8 +167,8 @@ loop:
 	return nil
 }
 
-func (t *DatabaseProxy) acceptConnections(ctx context.Context, listener net.Listener) <-chan ConnWithId {
-	ch := make(chan ConnWithId)
+func (t *DatabaseProxy) acceptConnections(ctx context.Context, listener net.Listener) <-chan ConnWithMetadata {
+	ch := make(chan ConnWithMetadata)
 	go pprof.Do(ctx, pprof.Labels("name", "accept-connections"), func(ctx context.Context) {
 		for {
 			conn, err := listener.Accept()
@@ -167,33 +177,55 @@ func (t *DatabaseProxy) acceptConnections(ctx context.Context, listener net.List
 			}
 			id := uuid.New().String()
 			t.logger.Infow("accepted connection", "id", id)
-			connWithId := ConnWithId{
-				ID:   id,
+			connWithMetadata := ConnWithMetadata{
 				Conn: conn,
+				Metadata: metadata.Metadata{
+					ConnectionID: id,
+					StateID:      t.abac.NewState(),
+					RemoteAddr:   conn.RemoteAddr().String(),
+				},
+			}
+			actions, err := t.abac.Observe(connWithMetadata.Metadata.StateID, abac.IPEvent(conn.RemoteAddr().String()), abac.TimeEvent(time.Now()))
+			if err == nil {
+				if actions&abac.Notify > 0 {
+					t.auditor.OnNotify("got-connection", connWithMetadata.Metadata)
+				}
+				if actions&abac.NotPermit > 0 || actions&abac.Disconnect > 0 {
+					if actions&abac.Notify > 0 {
+						t.auditor.OnNotify("not-permitted-connection", connWithMetadata.Metadata)
+					}
+					if err := conn.Close(); err != nil {
+						t.logger.Errorw("failed to close connection", "id", connWithMetadata.Metadata.ConnectionID, "err", err)
+					}
+					return
+				}
+			} else {
+				t.logger.Errorw("failed to observe", "state-id", connWithMetadata.Metadata.StateID, "err", err)
 			}
 			go pprof.Do(ctx, pprof.Labels("name", "on-connection-accept-event"), func(ctx context.Context) {
 				t.auditor.OnConnectionAccept(id, conn.LocalAddr().String(), conn.RemoteAddr().String())
 			})
-			ch <- connWithId
+			ch <- connWithMetadata
 		}
 		close(ch)
 	})
 	return ch
 }
 
-func (t *DatabaseProxy) handleConnection(ctx context.Context, conn ConnWithId) error {
+func (t *DatabaseProxy) handleConnection(ctx context.Context, conn ConnWithMetadata) error {
 	sConn, newChans, reqs, err := ssh.NewServerConn(conn.Conn, t.sshConfig)
 	if err != nil {
 		return fmt.Errorf("handshake failed: %w", err)
 	}
 	defer func() {
-		t.logger.Infow("closed connection", "id", conn.ID)
+		t.logger.Infow("closed connection", "id", conn.Metadata.ConnectionID)
 		go pprof.Do(ctx, pprof.Labels("name", "on-closed-connection-event"), func(ctx context.Context) {
 			err := sConn.Close()
 			if strings.Contains(err.Error(), "use of closed network connection") {
 				err = nil
 			}
-			t.auditor.OnConnectionClosed(conn.ID, err)
+			t.auditor.OnConnectionClosed(conn.Metadata.ConnectionID, err)
+			t.abac.DeleteState(conn.Metadata.StateID)
 		})
 	}()
 
@@ -203,10 +235,10 @@ func (t *DatabaseProxy) handleConnection(ctx context.Context, conn ConnWithId) e
 	}
 	databaseUsers := strings.Split(databaseUsersString, ",")
 	go pprof.Do(ctx, pprof.Labels("name", "on-database-users-event"), func(ctx context.Context) {
-		t.auditor.OnDatabaseUsers(conn.ID, databaseUsers)
+		t.auditor.OnDatabaseUsers(conn.Metadata.ConnectionID, databaseUsers)
 	})
 
-	go ssh.DiscardRequests(reqs) // todo
+	go ssh.DiscardRequests(reqs)
 
 	var wg sync.WaitGroup
 	for newChan := range newChans {
@@ -214,8 +246,14 @@ func (t *DatabaseProxy) handleConnection(ctx context.Context, conn ConnWithId) e
 		wg.Add(1)
 		go pprof.Do(ctx, pprof.Labels("name", "handle-new-channel"), func(ctx context.Context) {
 			defer wg.Done()
-			err := t.handleChannel(ctx, conn.ID, databaseUsers, newChan, conn.Conn.LocalAddr(), conn.Conn.RemoteAddr())
+			err := t.handleChannel(ctx, conn.Metadata, databaseUsers, newChan, conn.Conn.LocalAddr(), conn.Conn.RemoteAddr())
 			if err != nil {
+				if errors.Is(err, mitm.ErrDisconnectUser) {
+					if err := conn.Conn.Close(); err != nil {
+						t.logger.Errorw("failed to close connection", "id", conn.Metadata.ConnectionID, "err", err)
+						return
+					}
+				}
 				t.logger.Errorf("handle channel: %v", err)
 			}
 		})
@@ -224,7 +262,7 @@ func (t *DatabaseProxy) handleConnection(ctx context.Context, conn ConnWithId) e
 	return nil
 }
 
-func (t *DatabaseProxy) handleChannel(ctx context.Context, connID string, databaseUsers []string, newChan ssh.NewChannel, localAddr, remoteAddr net.Addr) error {
+func (t *DatabaseProxy) handleChannel(ctx context.Context, metadata metadata.Metadata, databaseUsers []string, newChan ssh.NewChannel, localAddr, remoteAddr net.Addr) error {
 	if newChan.ChannelType() != "direct-tcpip" {
 		if err := newChan.Reject(ssh.UnknownChannelType, "unsupported channel type"); err != nil {
 			return fmt.Errorf("reject channel: %w", err)
@@ -232,12 +270,13 @@ func (t *DatabaseProxy) handleChannel(ctx context.Context, connID string, databa
 		return nil
 	}
 	requestID := uuid.New().String()
+	metadata.RequestID = requestID
 	t.logger.Infow("accepted new request", "id", requestID)
 	defer func() {
 		t.logger.Infow("finished request", "id", requestID)
 	}()
 	go pprof.Do(ctx, pprof.Labels("name", "on-direct-tcpip-request-event"), func(ctx context.Context) {
-		t.auditor.OnDirectTCPIPRequest(connID, requestID)
+		t.auditor.OnDirectTCPIPRequest(metadata.ConnectionID, requestID)
 	})
 
 	ch, reqs, err := newChan.Accept()
@@ -252,13 +291,13 @@ func (t *DatabaseProxy) handleChannel(ctx context.Context, connID string, databa
 		return fmt.Errorf("unmarshal payload: %w", err)
 	}
 
-	go ssh.DiscardRequests(reqs) // todo
+	go ssh.DiscardRequests(reqs)
 
-	m, err := mitm.NewMITM(connID, requestID, databaseUsers, &forwardChannel{
+	m, err := mitm.NewMITM(metadata, databaseUsers, &forwardChannel{
 		ch:         ch,
 		localAddr:  localAddr,
 		remoteAddr: remoteAddr,
-	}, p.HostToConnect, p.PortToConnect, t.certIssuer, t.databaseCACertPool, t.auditor)
+	}, p.HostToConnect, p.PortToConnect, t.certIssuer, t.databaseCACertPool, t.auditor, t.abac, t.logger.With("name", "mitm", "connection-id", metadata.ConnectionID, "request-id", metadata.RequestID))
 	if err != nil {
 		return fmt.Errorf("create MITM: %w", err)
 	}
