@@ -26,82 +26,50 @@ type Operation struct {
 	Column string
 }
 
-//func FindOperationsRecursive(query string) ([]Operation, error) {
-//	root, err := pg_query.Parse(query)
-//	if err != nil {
-//		return nil, fmt.Errorf("parse query: %w", err)
-//	}
-//	var (
-//		tableAliases = make(map[string]string)
-//		tables       = make(map[string]struct{})
-//		statements   = make([]*pg_query.Node, 0, len(root.Stmts))
-//		conditions   []*pg_query.Node
-//		operations   = make(map[Operation]struct{})
-//	)
-//	walk := func(stmt *pg_query.Node, currentTable string) {
-//		if stmt == nil {
-//			return
-//		}
-//		switch node := stmt.Node.(type) {
-//		case *pg_query.Node_List:
-//			for _, item := range node.List.Items {
-//				walk(item, currentTable)
-//			}
-//			statements = append(statements, stmt.List.Items...)
-//		case *pg_query.Node_RawStmt:
-//			statements = append(statements, stmt.RawStmt.Stmt)
-//		}
-//	}
-//	for _, stmt := range root.Stmts {
-//		walk(stmt.Stmt, "")
-//	}
-//	result := make([]Operation, 0, len(operations))
-//	for op := range operations {
-//		result = append(result, op)
-//	}
-//	return result, nil
-//}
-
 func FindOperations(query string) ([]Operation, error) {
 	root, err := pg_query.Parse(query)
 	if err != nil {
 		return nil, fmt.Errorf("parse query: %w", err)
 	}
 
-	type state struct {
-		node         *pg_query.Node
-		currentTable string
-	}
-
 	var (
 		tableAliases = make(map[string]string)
 		tables       = make(map[string]struct{})
-		statements   = make([]state, 0, len(root.Stmts))
+		statements   = make([]*pg_query.Node, 0, len(root.Stmts))
 		conditions   []*pg_query.Node
 		operations   = make(map[Operation]struct{})
 	)
 	for _, stmt := range root.Stmts {
-		statements = append(statements, state{stmt.Stmt, ""})
+		statements = append(statements, stmt.Stmt)
 	}
 	for len(statements) > 0 || len(conditions) > 0 {
-		var statement state
+		var statement *pg_query.Node
 		if len(statements) > 0 {
 			statement, statements = statements[0], statements[1:]
 		}
-		if statement.node != nil {
-			switch stmt := statement.node.Node.(type) {
+		if statement != nil {
+			switch stmt := statement.Node.(type) {
 			case *pg_query.Node_List:
-				for _, item := range stmt.List.Items {
-					statements = append(statements, state{node: item, currentTable: statement.currentTable})
-				}
+				statements = append(statements, stmt.List.Items...)
 			case *pg_query.Node_RawStmt:
-				statements = append(statements, state{node: stmt.RawStmt.Stmt, currentTable: statement.currentTable})
+				statements = append(statements, stmt.RawStmt.Stmt)
 			case *pg_query.Node_SubLink:
 				if stmt.SubLink.Testexpr != nil {
 					conditions = append(conditions, stmt.SubLink.Testexpr)
 				}
 				if stmt.SubLink.Subselect != nil {
 					statements = append(statements, stmt.SubLink.Subselect)
+				}
+			case *pg_query.Node_AExpr:
+				if stmt.AExpr.Lexpr != nil {
+					aexprConditions, aexprStatements := handleAExpr(stmt.AExpr.Lexpr, Select)
+					conditions = append(conditions, aexprConditions...)
+					statements = append(statements, aexprStatements...)
+				}
+				if stmt.AExpr.Rexpr != nil {
+					aexprConditions, aexprStatements := handleAExpr(stmt.AExpr.Rexpr, Select)
+					conditions = append(conditions, aexprConditions...)
+					statements = append(statements, aexprStatements...)
 				}
 			case *pg_query.Node_SelectStmt:
 				selectStmt := stmt.SelectStmt
@@ -141,7 +109,7 @@ func FindOperations(query string) ([]Operation, error) {
 						statements = append(statements, targetStatements...)
 					}
 					if selectStmt.WhereClause != nil {
-						conditions = append(conditions, selectStmt.WhereClause)
+						statements = append(statements, selectStmt.WhereClause)
 					}
 					if selectStmt.WithClause != nil {
 						for _, item := range selectStmt.WithClause.Ctes {
@@ -169,6 +137,21 @@ func FindOperations(query string) ([]Operation, error) {
 					}
 					currentTable = updateStmt.Relation.Relname
 				}
+				for _, item := range updateStmt.FromClause {
+					if rangeSubSelect, ok := item.Node.(*pg_query.Node_RangeSubselect); ok && rangeSubSelect != nil {
+						statements = append(statements, rangeSubSelect.RangeSubselect.Subquery)
+					}
+					if rangeVar, ok := item.Node.(*pg_query.Node_RangeVar); ok && rangeVar != nil {
+						if rangeVar.RangeVar.Alias != nil {
+							tableAliases[rangeVar.RangeVar.Alias.Aliasname] = rangeVar.RangeVar.Relname
+							tables[rangeVar.RangeVar.Alias.Aliasname] = struct{}{}
+						} else {
+							tableAliases[rangeVar.RangeVar.Relname] = rangeVar.RangeVar.Relname
+							tables[rangeVar.RangeVar.Relname] = struct{}{}
+						}
+						currentTable = rangeVar.RangeVar.Relname
+					}
+				}
 				for _, target := range updateStmt.TargetList {
 					if node, ok := target.Node.(*pg_query.Node_ResTarget); ok && node != nil {
 						conditions = append(conditions, &pg_query.Node{
@@ -188,7 +171,7 @@ func FindOperations(query string) ([]Operation, error) {
 					}
 				}
 				if updateStmt.WhereClause != nil {
-					conditions = append(conditions, updateStmt.WhereClause)
+					statements = append(statements, updateStmt.WhereClause)
 				}
 				if updateStmt.WithClause != nil {
 					for _, item := range updateStmt.WithClause.Ctes {
@@ -266,6 +249,14 @@ func handleResTarget(item *pg_query.Node, currentTable string, statementType Sta
 						statements = append(statements, arg)
 					}
 				}
+			case *pg_query.Node_CaseExpr:
+				for _, arg := range target.CaseExpr.Args {
+					switch node := arg.Node.(type) {
+					case *pg_query.Node_CaseWhen:
+						statements = append(statements, node.CaseWhen.Expr, node.CaseWhen.Result)
+					}
+				}
+				statements = append(statements, target.CaseExpr.Defresult)
 			default:
 				statements = append(statements, &pg_query.Node{Node: target})
 			}
@@ -310,12 +301,12 @@ func conditionsFromJoinClauses(fromClause []*pg_query.Node) (conditions []*pg_qu
 		switch node := item.Node.(type) {
 		case *pg_query.Node_AExpr:
 			if node.AExpr.Lexpr != nil {
-				aexprConditions, aexprStatements := handleAExpr(node.AExpr.Lexpr)
+				aexprConditions, aexprStatements := handleAExpr(node.AExpr.Lexpr, Join)
 				conditions = append(conditions, aexprConditions...)
 				statements = append(statements, aexprStatements...)
 			}
 			if node.AExpr.Rexpr != nil {
-				aexprConditions, aexprStatements := handleAExpr(node.AExpr.Rexpr)
+				aexprConditions, aexprStatements := handleAExpr(node.AExpr.Rexpr, Join)
 				conditions = append(conditions, aexprConditions...)
 				statements = append(statements, aexprStatements...)
 			}
@@ -342,14 +333,14 @@ func conditionsFromJoinClauses(fromClause []*pg_query.Node) (conditions []*pg_qu
 	return
 }
 
-func handleAExpr(node *pg_query.Node) (conditions []*pg_query.Node, statements []*pg_query.Node) {
+func handleAExpr(node *pg_query.Node, statementType StatementType) (conditions []*pg_query.Node, statements []*pg_query.Node) {
 	switch columnRef := node.Node.(type) {
 	case *pg_query.Node_ColumnRef:
 		if len(columnRef.ColumnRef.Fields) == 1 {
 			columnRef.ColumnRef.Fields = []*pg_query.Node{nil, columnRef.ColumnRef.Fields[0]}
 		}
 		columnRef.ColumnRef.Fields = append(columnRef.ColumnRef.Fields, &pg_query.Node{
-			Node: &pg_query.Node_Integer{Integer: &pg_query.Integer{Ival: int32(Join)}},
+			Node: &pg_query.Node_Integer{Integer: &pg_query.Integer{Ival: int32(statementType)}},
 		})
 		conditions = append(conditions, node)
 	default:

@@ -234,6 +234,39 @@ ORDER BY
 		})
 	})
 
+	t.Run("update-with-subquery-complicated", func(t *testing.T) {
+		query := `UPDATE customers
+SET discount_rate = 
+    CASE
+        WHEN total_spent > 10000 THEN 0.20
+        WHEN total_spent > 5000 THEN 0.10
+        ELSE discount_rate
+    END
+FROM (
+    SELECT
+        o.customer_id,
+        SUM(o.total_amount) AS total_spent
+    FROM
+        orders o
+    WHERE
+        o.order_date >= (CURRENT_DATE - INTERVAL '1 year')
+    GROUP BY
+        o.customer_id
+) AS spending
+WHERE
+    customers.id = spending.customer_id;`
+		ops, err := FindOperations(query)
+		require.NoError(t, err)
+		require.ElementsMatch(t, ops, []Operation{
+			{Type: Select, Table: "customers", Column: "discount_rate"},
+			{Type: Select, Table: "orders", Column: "customer_id"},
+			{Type: Select, Table: "orders", Column: "total_amount"},
+			{Type: Select, Table: "orders", Column: "order_date"},
+			{Type: Select, Table: "customers", Column: "id"},
+			{Type: Update, Table: "customers", Column: "discount_rate"},
+		})
+	})
+
 	queryWithCTE := `
 WITH DepartmentSalaries AS (
     SELECT e.employee_id, e.salary, d.department_name
