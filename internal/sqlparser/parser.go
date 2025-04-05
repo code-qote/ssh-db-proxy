@@ -93,9 +93,7 @@ func FindOperations(query string) ([]Operation, error) {
 		return relation.Relname
 	}
 
-	statements = append(statements, sliceMap(root.Stmts, func(item *pg_query.RawStmt) state {
-		return state{NoOp, "", item.Stmt}
-	})...)
+	statements = append(statements, sliceMap(root.Stmts, func(item *pg_query.RawStmt) state { return state{NoOp, "", item.Stmt} })...)
 	for len(statements) > 0 {
 		var statement state
 		if len(statements) > 0 {
