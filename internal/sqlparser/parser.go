@@ -48,6 +48,7 @@ func FindOperations(query string) ([]Operation, error) {
 		statements    = make([]state, 0, len(root.Stmts))
 		operations    = make(map[Operation]struct{})
 	)
+
 	handleFrom := func(statement state, from []*pg_query.Node) (currentTable string) {
 		var item *pg_query.Node
 		for len(from) > 0 {
@@ -77,9 +78,24 @@ func FindOperations(query string) ([]Operation, error) {
 		}
 		return
 	}
-	for _, stmt := range root.Stmts {
-		statements = append(statements, state{NoOp, "", stmt.Stmt})
+
+	handleRelation := func(relation *pg_query.RangeVar) (currentTable string) {
+		if relation == nil {
+			return
+		}
+		if relation.Alias != nil {
+			tableAliases[relation.Alias.Aliasname] = relation.Relname
+			tables[relation.Alias.Aliasname] = struct{}{}
+		} else {
+			tableAliases[relation.Relname] = relation.Relname
+			tables[relation.Relname] = struct{}{}
+		}
+		return relation.Relname
 	}
+
+	statements = append(statements, sliceMap(root.Stmts, func(item *pg_query.RawStmt) state {
+		return state{NoOp, "", item.Stmt}
+	})...)
 	for len(statements) > 0 {
 		var statement state
 		if len(statements) > 0 {
@@ -108,16 +124,10 @@ func FindOperations(query string) ([]Operation, error) {
 						op.Column = column.String_.Sval
 					}
 				}
-				if op.Type == Select && op.Table == "" {
+				if _, isColumnAlias := columnAliases[op.Column]; op.Table == "" && (op.Type == Select || tableProvided || isColumnAlias) {
 					continue
 				}
-				if tableProvided && op.Table == "" {
-					continue
-				}
-				if _, ok := columnAliases[op.Column]; ok && op.Table == "" {
-					continue
-				}
-				if _, ok := ctes[op.Table]; ok {
+				if _, isCTE := ctes[op.Table]; isCTE {
 					continue
 				}
 				operations[op] = struct{}{}
@@ -147,134 +157,68 @@ func FindOperations(query string) ([]Operation, error) {
 			switch selectStmt.Op {
 			case pg_query.SetOperation_SETOP_NONE:
 				currentTable := handleFrom(statement, selectStmt.FromClause)
-				for _, item := range selectStmt.TargetList {
-					statements = append(statements, state{Select, currentTable, item})
-				}
-				for _, val := range selectStmt.ValuesLists {
-					statements = append(statements, state{Select, currentTable, val})
-				}
+				statements = append(statements, sliceMap(selectStmt.TargetList, func(item *pg_query.Node) state { return state{Select, currentTable, item} })...)
+				statements = append(statements, sliceMap(selectStmt.ValuesLists, func(item *pg_query.Node) state { return state{Select, currentTable, item} })...)
 				statements = append(statements, state{Select, currentTable, selectStmt.WhereClause})
 				statements = append(statements, state{Select, currentTable, selectStmt.HavingClause})
 				if selectStmt.WithClause != nil {
-					for _, cte := range selectStmt.WithClause.Ctes {
-						statements = append(statements, withNode(statement, cte))
-					}
+					statements = append(statements, sliceMap(selectStmt.WithClause.Ctes, func(item *pg_query.Node) state { return withNode(statement, item) })...)
 				}
 			case pg_query.SetOperation_SETOP_UNION, pg_query.SetOperation_SETOP_EXCEPT, pg_query.SetOperation_SETOP_INTERSECT:
 				statements = append(statements, withNode(statement, &pg_query.Node{Node: &pg_query.Node_SelectStmt{SelectStmt: selectStmt.Larg}}))
 				statements = append(statements, withNode(statement, &pg_query.Node{Node: &pg_query.Node_SelectStmt{SelectStmt: selectStmt.Rarg}}))
 			}
 		case *pg_query.Node_UpdateStmt:
-			var currentTable string
 			updateStmt := stmt.UpdateStmt
-			if updateStmt.Relation != nil {
-				if updateStmt.Relation.Alias != nil {
-					tableAliases[updateStmt.Relation.Alias.Aliasname] = updateStmt.Relation.Relname
-					tables[updateStmt.Relation.Alias.Aliasname] = struct{}{}
-				} else {
-					tableAliases[updateStmt.Relation.Relname] = updateStmt.Relation.Relname
-					tables[updateStmt.Relation.Relname] = struct{}{}
-				}
-				currentTable = updateStmt.Relation.Relname
-			}
+			currentTable := handleRelation(updateStmt.Relation)
 			handleFrom(statement, updateStmt.FromClause)
-			for _, target := range updateStmt.TargetList {
-				statements = append(statements, state{Update, currentTable, target})
-			}
+			statements = append(statements, sliceMap(updateStmt.TargetList, func(item *pg_query.Node) state { return state{Update, currentTable, item} })...)
 			statements = append(statements, state{Select, currentTable, updateStmt.WhereClause})
-			for _, returning := range updateStmt.ReturningList {
-				statements = append(statements, state{Select, currentTable, returning})
-			}
+			statements = append(statements, sliceMap(updateStmt.ReturningList, func(item *pg_query.Node) state { return state{Select, currentTable, item} })...)
 			if updateStmt.WithClause != nil {
-				for _, cte := range updateStmt.WithClause.Ctes {
-					statements = append(statements, withNode(statement, cte))
-				}
+				statements = append(statements, sliceMap(updateStmt.WithClause.Ctes, func(item *pg_query.Node) state { return withNode(statement, item) })...)
 			}
 		case *pg_query.Node_DeleteStmt:
-			var currentTable string
 			deleteStmt := stmt.DeleteStmt
-			if deleteStmt.Relation != nil {
-				if deleteStmt.Relation.Alias != nil {
-					tableAliases[deleteStmt.Relation.Alias.Aliasname] = deleteStmt.Relation.Relname
-					tables[deleteStmt.Relation.Alias.Aliasname] = struct{}{}
-				} else {
-					tableAliases[deleteStmt.Relation.Relname] = deleteStmt.Relation.Relname
-					tables[deleteStmt.Relation.Relname] = struct{}{}
-				}
-				currentTable = deleteStmt.Relation.Relname
-			}
+			currentTable := handleRelation(deleteStmt.Relation)
 			if deleteStmt.WhereClause != nil {
 				statements = append(statements, state{Delete, currentTable, deleteStmt.WhereClause})
 			}
-			for _, returning := range deleteStmt.ReturningList {
-				statements = append(statements, state{Select, currentTable, returning})
-			}
-			for _, using := range deleteStmt.UsingClause {
-				statements = append(statements, state{Select, currentTable, using})
-			}
+			statements = append(statements, sliceMap(deleteStmt.ReturningList, func(item *pg_query.Node) state { return state{Select, currentTable, item} })...)
+			statements = append(statements, sliceMap(deleteStmt.UsingClause, func(item *pg_query.Node) state { return state{Select, currentTable, item} })...)
 			if deleteStmt.WithClause != nil {
-				for _, cte := range deleteStmt.WithClause.Ctes {
-					statements = append(statements, withNode(statement, cte))
-				}
+				statements = append(statements, sliceMap(deleteStmt.WithClause.Ctes, func(item *pg_query.Node) state { return withNode(statement, item) })...)
 			}
 		case *pg_query.Node_InsertStmt:
-			var currentTable string
 			insertStmt := stmt.InsertStmt
-			if insertStmt.Relation != nil {
-				if insertStmt.Relation.Alias != nil {
-					tableAliases[insertStmt.Relation.Alias.Aliasname] = insertStmt.Relation.Relname
-					tables[insertStmt.Relation.Alias.Aliasname] = struct{}{}
-				} else {
-					tableAliases[insertStmt.Relation.Relname] = insertStmt.Relation.Relname
-					tables[insertStmt.Relation.Relname] = struct{}{}
-				}
-				currentTable = insertStmt.Relation.Relname
-			}
+			currentTable := handleRelation(insertStmt.Relation)
 			statements = append(statements, withNode(statement, stmt.InsertStmt.SelectStmt))
-			for _, col := range stmt.InsertStmt.Cols {
-				statements = append(statements, state{Insert, currentTable, col})
-			}
-			for _, node := range stmt.InsertStmt.ReturningList {
-				statements = append(statements, state{Select, currentTable, node})
-			}
+			statements = append(statements, sliceMap(stmt.InsertStmt.Cols, func(item *pg_query.Node) state { return state{Insert, currentTable, item} })...)
+			statements = append(statements, sliceMap(stmt.InsertStmt.ReturningList, func(item *pg_query.Node) state { return state{Select, currentTable, item} })...)
 			if insertStmt.WithClause != nil {
-				for _, cte := range insertStmt.WithClause.Ctes {
-					statements = append(statements, withNode(statement, cte))
-				}
+				statements = append(statements, sliceMap(insertStmt.WithClause.Ctes, func(item *pg_query.Node) state { return withNode(statement, item) })...)
 			}
 			if stmt.InsertStmt.OnConflictClause != nil {
 				statements = append(statements, state{Select, currentTable, stmt.InsertStmt.OnConflictClause.WhereClause})
-				for _, col := range stmt.InsertStmt.OnConflictClause.TargetList {
-					statements = append(statements, state{Update, currentTable, col})
-				}
+				statements = append(statements, sliceMap(stmt.InsertStmt.OnConflictClause.TargetList, func(item *pg_query.Node) state { return state{Update, currentTable, item} })...)
 				if stmt.InsertStmt.OnConflictClause.Infer != nil {
 					statements = append(statements, state{Select, currentTable, stmt.InsertStmt.OnConflictClause.Infer.WhereClause})
-					for _, elem := range stmt.InsertStmt.OnConflictClause.Infer.IndexElems {
-						statements = append(statements, state{Select, currentTable, elem})
-					}
+					statements = append(statements, sliceMap(stmt.InsertStmt.OnConflictClause.Infer.IndexElems, func(item *pg_query.Node) state { return state{Select, currentTable, item} })...)
 				}
 			}
 		case *pg_query.Node_FuncCall:
-			for _, arg := range stmt.FuncCall.Args {
-				statements = append(statements, withNode(statement, arg))
-			}
+			statements = append(statements, sliceMap(stmt.FuncCall.Args, func(item *pg_query.Node) state { return withNode(statement, item) })...)
 			if stmt.FuncCall.Over != nil {
-				for _, partition := range stmt.FuncCall.Over.PartitionClause {
-					statements = append(statements, withNode(statement, partition))
-				}
+				statements = append(statements, sliceMap(stmt.FuncCall.Over.PartitionClause, func(item *pg_query.Node) state { return withNode(statement, item) })...)
 			}
 		case *pg_query.Node_CaseExpr:
-			for _, arg := range stmt.CaseExpr.Args {
-				statements = append(statements, state{Type: Select, Table: statement.Table, Node: arg})
-			}
+			statements = append(statements, sliceMap(stmt.CaseExpr.Args, func(item *pg_query.Node) state { return state{Type: Select, Table: statement.Table, Node: item} })...)
 			statements = append(statements, state{Type: Select, Table: statement.Table, Node: stmt.CaseExpr.Defresult})
 		case *pg_query.Node_CaseWhen:
 			statements = append(statements, withNode(statement, stmt.CaseWhen.Result))
 			statements = append(statements, withNode(statement, stmt.CaseWhen.Expr))
 		case *pg_query.Node_List:
-			for _, item := range stmt.List.Items {
-				statements = append(statements, withNode(statement, item))
-			}
+			statements = append(statements, sliceMap(stmt.List.Items, func(item *pg_query.Node) state { return withNode(statement, item) })...)
 		case *pg_query.Node_RawStmt:
 			statements = append(statements, withNode(statement, stmt.RawStmt.Stmt))
 		case *pg_query.Node_SubLink:
@@ -286,15 +230,11 @@ func FindOperations(query string) ([]Operation, error) {
 		case *pg_query.Node_RangeSubselect:
 			statements = append(statements, withNode(statement, stmt.RangeSubselect.Subquery))
 		case *pg_query.Node_BoolExpr:
-			for _, arg := range stmt.BoolExpr.Args {
-				statements = append(statements, withNode(statement, arg))
-			}
+			statements = append(statements, sliceMap(stmt.BoolExpr.Args, func(item *pg_query.Node) state { return withNode(statement, item) })...)
 		case *pg_query.Node_NullTest:
 			statements = append(statements, withNode(statement, stmt.NullTest.Arg))
 		case *pg_query.Node_NullIfExpr:
-			for _, arg := range stmt.NullIfExpr.Args {
-				statements = append(statements, withNode(statement, arg))
-			}
+			statements = append(statements, sliceMap(stmt.NullIfExpr.Args, func(item *pg_query.Node) state { return withNode(statement, item) })...)
 		case *pg_query.Node_CommonTableExpr:
 			ctes[stmt.CommonTableExpr.Ctename] = struct{}{}
 			statements = append(statements, withNode(statement, stmt.CommonTableExpr.Ctequery))
@@ -319,4 +259,12 @@ func FindOperations(query string) ([]Operation, error) {
 func withNode(state state, newNode *pg_query.Node) state {
 	state.Node = newNode
 	return state
+}
+
+func sliceMap[T, R any](collection []T, predicate func(T) R) []R {
+	result := make([]R, len(collection))
+	for i := range collection {
+		result[i] = predicate(collection[i])
+	}
+	return result
 }
