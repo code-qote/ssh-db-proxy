@@ -6,6 +6,8 @@ import (
 	"net"
 	"regexp"
 	"time"
+
+	"ssh-db-proxy/internal/sqlparser"
 )
 
 type Action int
@@ -101,9 +103,12 @@ func (c *IPCondition) Matches(state State) bool {
 	if c == nil {
 		return false
 	}
-	ipAddr, err := net.ResolveIPAddr("ip6", state.IP)
+	if !state.Time.set {
+		return false
+	}
+	ipAddr, err := net.ResolveIPAddr("ip6", state.IP.value)
 	if err != nil {
-		ipAddr, err = net.ResolveIPAddr("ip", state.IP)
+		ipAddr, err = net.ResolveIPAddr("ip", state.IP.value)
 		if err != nil {
 			return false
 		}
@@ -141,8 +146,11 @@ func (c *DatabaseUsernameCondition) Matches(state State) bool {
 	if c == nil {
 		return false
 	}
+	if !state.DatabaseUsername.set {
+		return false
+	}
 	for _, reg := range c.regexps {
-		if reg.MatchString(state.DatabaseUsername) {
+		if reg.MatchString(state.DatabaseUsername.value) {
 			return true
 		}
 	}
@@ -173,8 +181,11 @@ func (c *DatabaseNameCondition) Matches(state State) bool {
 	if c == nil {
 		return false
 	}
+	if !state.DatabaseName.set {
+		return false
+	}
 	for _, reg := range c.regexps {
-		if reg.MatchString(state.DatabaseName) {
+		if reg.MatchString(state.DatabaseName.value) {
 			return true
 		}
 	}
@@ -272,7 +283,10 @@ func (c *TimeCondition) Matches(state State) bool {
 	if c == nil {
 		return false
 	}
-	t := state.Time.In(c.location)
+	if !state.Time.set {
+		return false
+	}
+	t := state.Time.value.In(c.location)
 
 	if len(c.Weekday) > 0 {
 		weekdayMatches := false
@@ -359,4 +373,71 @@ func (c *TimeCondition) Matches(state State) bool {
 		}
 	}
 	return true
+}
+
+type QueryCondition struct {
+	StatementType string
+	TableRegexps  []string
+	ColumnRegexps []string
+	Strict        bool
+
+	statementType sqlparser.StatementType
+	tableRegexps  []*regexp.Regexp
+	columnRegexps []*regexp.Regexp
+}
+
+func (c *QueryCondition) Init() error {
+	if c.StatementType != "" {
+		typ, ok := sqlparser.StatementTypeByString[c.StatementType]
+		if !ok {
+			return fmt.Errorf("invalid statement type: %s", c.StatementType)
+		}
+		c.statementType = typ
+	}
+	for _, tableRegexp := range c.TableRegexps {
+		re, err := regexp.Compile(tableRegexp)
+		if err != nil {
+			return err
+		}
+		c.tableRegexps = append(c.tableRegexps, re)
+	}
+	for _, columnRegexp := range c.ColumnRegexps {
+		re, err := regexp.Compile(columnRegexp)
+		if err != nil {
+			return err
+		}
+		c.columnRegexps = append(c.columnRegexps, re)
+	}
+	return nil
+}
+
+func (c *QueryCondition) Matches(state State) bool {
+	for _, statement := range state.QueryStatements {
+		if c.statementType != sqlparser.NoOp {
+			if statement.Type != c.statementType {
+				continue
+			}
+		}
+		tableMatches := false
+		for _, tableRegexp := range c.tableRegexps {
+			if tableRegexp.MatchString(statement.Table) {
+				tableMatches = true
+				break
+			}
+		}
+		columnMatches := false
+		for _, columnRegexp := range c.columnRegexps {
+			if columnRegexp.MatchString(statement.Column) {
+				columnMatches = true
+				break
+			}
+		}
+		if columnMatches && tableMatches {
+			return true
+		}
+		if statement.Column == "" && statement.Table != "" && tableMatches && c.Strict {
+			return true
+		}
+	}
+	return false
 }

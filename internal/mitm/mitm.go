@@ -21,6 +21,7 @@ import (
 	"ssh-db-proxy/internal/auditor"
 	"ssh-db-proxy/internal/certissuer"
 	"ssh-db-proxy/internal/metadata"
+	"ssh-db-proxy/internal/sqlparser"
 )
 
 const (
@@ -58,6 +59,9 @@ type MITM struct {
 }
 
 func NewMITM(metadata metadata.Metadata, users []string, conn net.Conn, targetHost string, targetPort uint32, certIssuer *certissuer.CertIssuer, caCertPool *x509.CertPool, auditor auditor.Auditor, abac *abac.ABAC, logger *zap.SugaredLogger) (*MITM, error) {
+	if logger == nil {
+		logger = zap.NewNop().Sugar()
+	}
 	m := &MITM{
 		metadata:   metadata,
 		users:      users,
@@ -68,6 +72,7 @@ func NewMITM(metadata metadata.Metadata, users []string, conn net.Conn, targetHo
 		caCertPool: caCertPool,
 		auditor:    auditor,
 		abac:       abac,
+		logger:     logger,
 	}
 	m.backend.Backend = pgproto3.NewBackend(pgproto3.NewChunkReader(conn), conn)
 	return m, nil
@@ -97,9 +102,15 @@ func (m *MITM) Proxy(ctx context.Context) error {
 		return fmt.Errorf("prepare client: %w", err)
 	}
 
-	wg := errgroup.Group{}
+	var (
+		disconnect bool
+		wg         errgroup.Group
+	)
 	wg.Go(func() error {
 		if err := m.proxyClientToServer(); err != nil {
+			if errors.Is(err, ErrDisconnectUser) {
+				disconnect = true
+			}
 			return fmt.Errorf("proxy client to server: %w", err)
 		}
 		return nil
@@ -110,8 +121,12 @@ func (m *MITM) Proxy(ctx context.Context) error {
 		}
 		return nil
 	})
-	if err := wg.Wait(); err != nil && !errors.Is(err, io.EOF) {
-		fmt.Println(err)
+	err = wg.Wait()
+	if err != nil && !errors.Is(err, io.EOF) {
+		m.logger.Error(err)
+	}
+	if disconnect {
+		return ErrDisconnectUser
 	}
 	return nil
 }
@@ -195,7 +210,29 @@ func (m *MITM) proxyClientToServer() error {
 		}
 		if err = m.handleMessage(msg); err != nil {
 			if errors.Is(err, ErrTerminateMessage) {
+				if err := m.frontend.Send(&pgproto3.Terminate{}); err != nil {
+					return err
+				}
 				return nil
+			}
+			if errors.Is(err, ErrUserPermissionDenied) {
+				if err := m.backend.Send(&pgproto3.ErrorResponse{Code: "403", Message: "Query is not permitted by administrator"}); err != nil {
+					return err
+				}
+				if err := m.backend.Send(&pgproto3.ReadyForQuery{TxStatus: txStatusIdle}); err != nil {
+					return err
+				}
+				continue
+			}
+			if errors.Is(err, ErrDisconnectUser) {
+				m.isHalfClosed.Store(true)
+				if err := m.frontend.Send(&pgproto3.Terminate{}); err != nil {
+					return err
+				}
+				if err := m.backend.Send(&pgproto3.ErrorResponse{Code: "403", Message: "Query is not permitted by administrator"}); err != nil {
+					return err
+				}
+				return ErrDisconnectUser
 			}
 			fmt.Println(err)
 		}
@@ -239,13 +276,13 @@ func (m *MITM) handleMessage(msg pgproto3.FrontendMessage) error {
 		go pprof.Do(context.Background(), pprof.Labels("name", "on-query-message-event"), func(ctx context.Context) {
 			m.auditor.OnQueryMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
 		})
-		return nil
+		return m.onQuery(msgV.String)
 	case *pgproto3.Parse:
 		msgV := *msg
 		go pprof.Do(context.Background(), pprof.Labels("name", "on-parse-message-event"), func(ctx context.Context) {
 			m.auditor.OnParseMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
 		})
-		return nil
+		return m.onQuery(msgV.Query)
 	case *pgproto3.Bind:
 		msgV := *msg
 		go pprof.Do(context.Background(), pprof.Labels("name", "on-parse-message-event"), func(ctx context.Context) {
@@ -275,13 +312,56 @@ func (m *MITM) handleMessage(msg pgproto3.FrontendMessage) error {
 		go pprof.Do(context.Background(), pprof.Labels("name", "on-terminate-message-event"), func(ctx context.Context) {
 			m.auditor.OnTerminateMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
 		})
-		if err := m.frontend.Send(&pgproto3.Terminate{}); err != nil {
-			return err
-		}
 		return ErrTerminateMessage
 	default:
 		return fmt.Errorf("unexpected Frontend message: %T", msg)
 	}
+}
+
+func (m *MITM) onQuery(query string) error {
+	queryStatements, err := sqlparser.ExtractQueryStatements(query)
+	if err != nil {
+		m.logger.Errorf("extract query statements: %s", err)
+		return nil
+	}
+	stateID := m.abac.NewStateFrom(m.metadata.StateID)
+	defer m.abac.DeleteState(stateID)
+
+	actions, err := m.abac.Observe(stateID, abac.QueryStatementsEvent(queryStatements))
+	if err != nil {
+		m.logger.Errorf("observe query statements: %s", err)
+	}
+	var data metadata.Metadata
+	if actions > 0 {
+		data = m.metadata.Copy()
+		for _, statement := range queryStatements {
+			data.QueryStatements = append(data.QueryStatements, metadata.QueryStatement{
+				StatementType: sqlparser.StringByStatementType[statement.Type],
+				Table:         statement.Table,
+				Column:        statement.Column,
+			})
+		}
+		data.Query = query
+	}
+	if actions&abac.Notify > 0 {
+		m.auditor.OnNotify("query statements observed", data)
+	}
+	if actions&abac.Disconnect > 0 {
+		if err := m.frontend.Send(&pgproto3.Terminate{}); err != nil {
+			return err
+		}
+		if actions&abac.Notify > 0 {
+			m.auditor.OnNotify("user was disconnected from database because of the query", data)
+		}
+		return ErrDisconnectUser
+	}
+	if actions&abac.NotPermit > 0 {
+		if actions&abac.Notify > 0 {
+			m.auditor.OnNotify("query was not permitted", data)
+		}
+		return ErrUserPermissionDenied
+	}
+	return nil
 }
 
 func (m *MITM) connectToDatabase(ctx context.Context, frontendParameters map[string]string) error {

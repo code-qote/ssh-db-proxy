@@ -20,7 +20,24 @@ const (
 	Delete
 )
 
-type Operation struct {
+var (
+	StatementTypeByString = map[string]StatementType{
+		"select": Select,
+		"join":   Join,
+		"update": Update,
+		"insert": Insert,
+		"delete": Delete,
+	}
+	StringByStatementType = map[StatementType]string{
+		Select: "select",
+		Join:   "join",
+		Update: "update",
+		Insert: "insert",
+		Delete: "delete",
+	}
+)
+
+type QueryStatement struct {
 	Type   StatementType
 	Table  string
 	Column string
@@ -34,7 +51,7 @@ type state struct {
 	Node  *pg_query.Node
 }
 
-func FindOperations(query string) ([]Operation, error) {
+func ExtractQueryStatements(query string) ([]QueryStatement, error) {
 	root, err := pg_query.Parse(query)
 	if err != nil {
 		return nil, fmt.Errorf("parse query: %w", err)
@@ -46,7 +63,7 @@ func FindOperations(query string) ([]Operation, error) {
 		ctes          = make(map[string]struct{})
 		tables        = make(map[string]struct{})
 		statements    = make([]state, 0, len(root.Stmts))
-		operations    = make(map[Operation]struct{})
+		operations    = make(map[QueryStatement]struct{})
 	)
 
 	handleRelation := func(relation *pg_query.RangeVar) (currentTable string) {
@@ -99,7 +116,7 @@ func FindOperations(query string) ([]Operation, error) {
 		switch stmt := statement.Node.Node.(type) {
 		case *pg_query.Node_ColumnRef:
 			if statement.Type != NoOp {
-				op := Operation{Type: statement.Type}
+				op := QueryStatement{Type: statement.Type}
 				tableProvided := false
 				if len(stmt.ColumnRef.Fields) == 1 {
 					if column, ok := stmt.ColumnRef.Fields[0].Node.(*pg_query.Node_String_); ok && column != nil {
@@ -175,6 +192,14 @@ func FindOperations(query string) ([]Operation, error) {
 			currentTable := handleRelation(deleteStmt.Relation)
 			if deleteStmt.WhereClause != nil {
 				statements = append(statements, state{Delete, currentTable, deleteStmt.WhereClause})
+			} else {
+				op := QueryStatement{
+					Type:         Delete,
+					Table:        currentTable,
+					Column:       "",
+					currentTable: true,
+				}
+				operations[op] = struct{}{}
 			}
 			statements = append(statements, sliceMap(deleteStmt.ReturningList, func(item *pg_query.Node) state { return state{Select, currentTable, item} })...)
 			statements = append(statements, sliceMap(deleteStmt.UsingClause, func(item *pg_query.Node) state { return state{Select, currentTable, item} })...)
@@ -232,7 +257,7 @@ func FindOperations(query string) ([]Operation, error) {
 			statements = append(statements, withNode(statement, stmt.CommonTableExpr.Ctequery))
 		}
 	}
-	preResult := make(map[Operation]struct{}, len(operations))
+	preResult := make(map[QueryStatement]struct{}, len(operations))
 	for op := range operations {
 		if _, ok := columnAliases[op.Column]; ok && op.currentTable {
 			delete(operations, op)
@@ -241,7 +266,7 @@ func FindOperations(query string) ([]Operation, error) {
 		op.currentTable = false
 		preResult[op] = struct{}{}
 	}
-	result := make([]Operation, 0, len(preResult))
+	result := make([]QueryStatement, 0, len(preResult))
 	for op := range preResult {
 		result = append(result, op)
 	}

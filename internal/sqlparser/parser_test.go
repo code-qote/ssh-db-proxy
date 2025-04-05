@@ -7,45 +7,61 @@ import (
 )
 
 func TestQueryCondition(t *testing.T) {
+	t.Run("select-all", func(t *testing.T) {
+		query := "select * from table1;"
+		ops, err := ExtractQueryStatements(query)
+		require.NoError(t, err)
+		require.ElementsMatch(t, ops, []QueryStatement{
+			{Type: Select, Table: "table1", Column: ""},
+		})
+	})
+	t.Run("delete-all", func(t *testing.T) {
+		query := "delete from table1;"
+		ops, err := ExtractQueryStatements(query)
+		require.NoError(t, err)
+		require.ElementsMatch(t, ops, []QueryStatement{
+			{Type: Delete, Table: "table1", Column: ""},
+		})
+	})
 	t.Run("simple", func(t *testing.T) {
 		query := "select tt.a, tt.b from table1 as tt;"
-		ops, err := FindOperations(query)
+		ops, err := ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Select, Table: "table1", Column: "a"},
 			{Type: Select, Table: "table1", Column: "b"},
 		})
 	})
 	t.Run("subquery", func(t *testing.T) {
 		query := "select tt.a, tt.b from (select a, b from table1) as tt;"
-		ops, err := FindOperations(query)
+		ops, err := ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Select, Table: "table1", Column: "a"},
 			{Type: Select, Table: "table1", Column: "b"},
 		})
 
 		query = "select tt.a, tt.b from (select tt.a, tt.b from table1 as tt) as tt;"
-		ops, err = FindOperations(query)
+		ops, err = ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Select, Table: "table1", Column: "a"},
 			{Type: Select, Table: "table1", Column: "b"},
 		})
 
 		query = "select tt.a, table2.c from (select tt.a, tt.b from table1 as tt) as tt, table2;"
-		ops, err = FindOperations(query)
+		ops, err = ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Select, Table: "table1", Column: "a"},
 			{Type: Select, Table: "table1", Column: "b"},
 			{Type: Select, Table: "table2", Column: "c"},
 		})
 
 		query = "select tt.a, c from (select tt.a, tt.b from table1 as tt) as tt, table2;"
-		ops, err = FindOperations(query)
+		ops, err = ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Select, Table: "table1", Column: "a"},
 			{Type: Select, Table: "table1", Column: "b"},
 			{Type: Select, Table: "table2", Column: "c"},
@@ -84,9 +100,9 @@ WHERE
         AND o.order_date >= CURRENT_DATE - INTERVAL '1 month'
     ) > 0;`
 
-		ops, err := FindOperations(query)
+		ops, err := ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Select, Table: "orders", Column: "order_id"},
 			{Type: Select, Table: "orders", Column: "order_date"},
 			{Type: Select, Table: "orders", Column: "user_id"},
@@ -98,18 +114,18 @@ WHERE
 
 	t.Run("join", func(t *testing.T) {
 		query := "select a from table1 inner join table2 on b = a"
-		ops, err := FindOperations(query)
+		ops, err := ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Select, Table: "table1", Column: "a"},
 			{Type: Join, Table: "", Column: "a"},
 			{Type: Join, Table: "", Column: "b"},
 		})
 
 		query = "select table1.a from table1 inner join table2 on table2.b = table1.a"
-		ops, err = FindOperations(query)
+		ops, err = ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Select, Table: "table1", Column: "a"},
 			{Type: Join, Table: "table1", Column: "a"},
 			{Type: Join, Table: "table2", Column: "b"},
@@ -133,9 +149,9 @@ WHERE
 ORDER BY
     o.order_date DESC,
     c.name ASC;`
-		ops, err := FindOperations(query)
+		ops, err := ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Select, Table: "customers", Column: "id"},
 			{Type: Select, Table: "customers", Column: "name"},
 			{Type: Select, Table: "customers", Column: "email"},
@@ -171,9 +187,9 @@ WHERE
     total_orders.total_order_amount > 1000
 ORDER BY
     total_orders.total_order_amount DESC;`
-		ops, err := FindOperations(query)
+		ops, err := ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Select, Table: "customers", Column: "name"},
 			{Type: Select, Table: "orders", Column: "customer_id"},
 			{Type: Select, Table: "orders", Column: "total_amount"},
@@ -202,9 +218,9 @@ WHERE
     sales_summary.total_sales_amount > 5000
 ORDER BY
     sales_summary.total_sales_amount DESC;`
-		ops, err = FindOperations(query)
+		ops, err = ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Select, Table: "categories", Column: "name"},
 			{Type: Select, Table: "products", Column: "category_id"},
 			{Type: Select, Table: "sales", Column: "id"},
@@ -217,9 +233,9 @@ ORDER BY
 
 	t.Run("update", func(t *testing.T) {
 		query := `update table1 set a = 1, b = 2;`
-		ops, err := FindOperations(query)
+		ops, err := ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Update, Table: "table1", Column: "a"},
 			{Type: Update, Table: "table1", Column: "b"},
 		})
@@ -227,9 +243,9 @@ ORDER BY
 
 	t.Run("update-with-subselect", func(t *testing.T) {
 		query := `update table1 set a = (select max((select min(c) from table3 where table3.c = table2.d)) from table2), b = a;`
-		ops, err := FindOperations(query)
+		ops, err := ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Select, Table: "table2", Column: "d"},
 			{Type: Select, Table: "table3", Column: "c"},
 			{Type: Update, Table: "table1", Column: "a"},
@@ -258,9 +274,9 @@ ORDER BY
 	) AS spending
 	WHERE
 	   customers.id = spending.customer_id;`
-		ops, err := FindOperations(query)
+		ops, err := ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Select, Table: "customers", Column: "discount_rate"},
 			{Type: Select, Table: "orders", Column: "customer_id"},
 			{Type: Select, Table: "orders", Column: "total_amount"},
@@ -272,16 +288,16 @@ ORDER BY
 
 	t.Run("delete", func(t *testing.T) {
 		query := `delete from table1 where a = 1;`
-		ops, err := FindOperations(query)
+		ops, err := ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Delete, Table: "table1", Column: "a"},
 		})
 
 		query = `delete from table1 where a = (select max(b) from table2);`
-		ops, err = FindOperations(query)
+		ops, err = ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Delete, Table: "table1", Column: "a"},
 			{Type: Select, Table: "table2", Column: "b"},
 		})
@@ -296,9 +312,9 @@ USING (
     WHERE c.active = FALSE AND o.id IS NULL
 ) AS inactive_customers
 WHERE customers.id = inactive_customers.id;`
-		ops, err := FindOperations(query)
+		ops, err := ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Select, Table: "customers", Column: "active"},
 			{Type: Select, Table: "customers", Column: "id"},
 			{Type: Select, Table: "orders", Column: "id"},
@@ -321,9 +337,9 @@ WHERE customers.id = inactive_customers.id;`
 	HAVING SUM(o.total_amount) < -1000
 	) AS excessive_returns
 	WHERE customers.id = excessive_returns.id;`
-		ops, err := FindOperations(query)
+		ops, err := ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Select, Table: "customers", Column: "id"},
 			{Type: Select, Table: "orders", Column: "total_amount"},
 			{Type: Select, Table: "orders", Column: "order_date"},
@@ -336,9 +352,9 @@ WHERE customers.id = inactive_customers.id;`
 	t.Run("insert", func(t *testing.T) {
 		query := `insert into table1 (a, b) values ((select max(c) from table1), (select min(c) from table2)) 
 on conflict do update set a = (select 1), b = (select min(c) from table2);`
-		ops, err := FindOperations(query)
+		ops, err := ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Select, Table: "table1", Column: "c"},
 			{Type: Select, Table: "table2", Column: "c"},
 			{Type: Update, Table: "table1", Column: "a"},
@@ -359,9 +375,9 @@ WITH DepartmentSalaries AS (
 UPDATE employees
 SET salary = salary * 1.1
 WHERE employee_id IN (SELECT employee_id FROM DepartmentSalaries);`
-		ops, err := FindOperations(query)
+		ops, err := ExtractQueryStatements(query)
 		require.NoError(t, err)
-		require.ElementsMatch(t, ops, []Operation{
+		require.ElementsMatch(t, ops, []QueryStatement{
 			{Type: Select, Table: "employees", Column: "salary"},
 			{Type: Select, Table: "employees", Column: "employee_id"},
 			{Type: Select, Table: "departments", Column: "department_name"},
@@ -382,9 +398,9 @@ WHERE e.salary > (
     WHERE department_id = e.department_id
 );`
 
-			ops, err := FindOperations(query)
+			ops, err := ExtractQueryStatements(query)
 			require.NoError(t, err)
-			require.ElementsMatch(t, ops, []Operation{
+			require.ElementsMatch(t, ops, []QueryStatement{
 				{Type: Select, Table: "employees", Column: "employee_id"},
 				{Type: Select, Table: "employees", Column: "salary"},
 				{Type: Select, Table: "employees", Column: "department_id"},
@@ -399,9 +415,9 @@ JOIN departments d ON e.department_id = d.department_id
 JOIN locations l ON d.location_id = l.location_id
 WHERE l.country_id = 'US';`
 
-			ops, err := FindOperations(query)
+			ops, err := ExtractQueryStatements(query)
 			require.NoError(t, err)
-			require.ElementsMatch(t, ops, []Operation{
+			require.ElementsMatch(t, ops, []QueryStatement{
 				{Type: Select, Table: "employees", Column: "employee_id"},
 				{Type: Select, Table: "employees", Column: "first_name"},
 				{Type: Select, Table: "departments", Column: "department_name"},
@@ -429,9 +445,9 @@ UPDATE employees
 SET salary = (SELECT new_salary FROM SalaryIncrease WHERE employee_id = employees.employee_id)
 WHERE employee_id IN (SELECT employee_id FROM SalaryIncrease);`
 
-			ops, err := FindOperations(query)
+			ops, err := ExtractQueryStatements(query)
 			require.NoError(t, err)
-			require.ElementsMatch(t, ops, []Operation{
+			require.ElementsMatch(t, ops, []QueryStatement{
 				{Type: Select, Table: "employees", Column: "employee_id"},
 				{Type: Select, Table: "employees", Column: "salary"},
 				{Type: Select, Table: "employees", Column: "department_id"},
@@ -449,9 +465,9 @@ JOIN departments d ON e.department_id = d.department_id
 GROUP BY d.department_name
 HAVING AVG(e.salary) > 50000;`
 
-			ops, err := FindOperations(query)
+			ops, err := ExtractQueryStatements(query)
 			require.NoError(t, err)
-			require.ElementsMatch(t, ops, []Operation{
+			require.ElementsMatch(t, ops, []QueryStatement{
 				{Type: Select, Table: "departments", Column: "department_name"},
 				{Type: Select, Table: "employees", Column: "salary"},
 				{Type: Join, Table: "employees", Column: "department_id"},
@@ -465,9 +481,9 @@ SELECT employee_id, salary,
        RANK() OVER (PARTITION BY department_id ORDER BY salary DESC) as rank
 FROM employees;`
 
-			ops, err := FindOperations(query)
+			ops, err := ExtractQueryStatements(query)
 			require.NoError(t, err)
-			require.ElementsMatch(t, ops, []Operation{
+			require.ElementsMatch(t, ops, []QueryStatement{
 				{Type: Select, Table: "employees", Column: "employee_id"},
 				{Type: Select, Table: "employees", Column: "salary"},
 				{Type: Select, Table: "employees", Column: "department_id"},
@@ -484,9 +500,9 @@ SELECT employee_id, first_name
 FROM managers
 WHERE salary > 100000;`
 
-			ops, err := FindOperations(query)
+			ops, err := ExtractQueryStatements(query)
 			require.NoError(t, err)
-			require.ElementsMatch(t, ops, []Operation{
+			require.ElementsMatch(t, ops, []QueryStatement{
 				{Type: Select, Table: "employees", Column: "employee_id"},
 				{Type: Select, Table: "employees", Column: "first_name"},
 				{Type: Select, Table: "employees", Column: "salary"},
@@ -505,9 +521,9 @@ WHERE department_id = (
     WHERE department_name = 'Sales'
 );`
 
-			ops, err := FindOperations(query)
+			ops, err := ExtractQueryStatements(query)
 			require.NoError(t, err)
-			require.ElementsMatch(t, ops, []Operation{
+			require.ElementsMatch(t, ops, []QueryStatement{
 				{Type: Delete, Table: "employees", Column: "department_id"},
 				{Type: Select, Table: "departments", Column: "department_id"},
 				{Type: Select, Table: "departments", Column: "department_name"},
@@ -521,9 +537,9 @@ SELECT employee_id, salary
 FROM employees
 WHERE salary > 100000;`
 
-			ops, err := FindOperations(query)
+			ops, err := ExtractQueryStatements(query)
 			require.NoError(t, err)
-			require.ElementsMatch(t, ops, []Operation{
+			require.ElementsMatch(t, ops, []QueryStatement{
 				{Type: Insert, Table: "high_salary_employees", Column: "employee_id"},
 				{Type: Insert, Table: "high_salary_employees", Column: "salary"},
 				{Type: Select, Table: "employees", Column: "employee_id"},
@@ -537,9 +553,9 @@ SELECT department_id, COUNT(*) as num_employees, MAX(salary) as max_salary
 FROM employees
 GROUP BY department_id;`
 
-			ops, err := FindOperations(query)
+			ops, err := ExtractQueryStatements(query)
 			require.NoError(t, err)
-			require.ElementsMatch(t, ops, []Operation{
+			require.ElementsMatch(t, ops, []QueryStatement{
 				{Type: Select, Table: "employees", Column: "department_id"},
 				{Type: Select, Table: "employees", Column: "salary"},
 			})
@@ -559,9 +575,9 @@ WITH RECURSIVE EmployeeHierarchy AS (
 SELECT employee_id, first_name
 FROM EmployeeHierarchy;`
 
-			ops, err := FindOperations(query)
+			ops, err := ExtractQueryStatements(query)
 			require.NoError(t, err)
-			require.ElementsMatch(t, ops, []Operation{
+			require.ElementsMatch(t, ops, []QueryStatement{
 				{Type: Select, Table: "employees", Column: "employee_id"},
 				{Type: Select, Table: "employees", Column: "manager_id"},
 				{Type: Select, Table: "employees", Column: "first_name"},
@@ -575,9 +591,9 @@ SELECT e.employee_id, e.first_name, d.department_name
 FROM employees e
 FULL OUTER JOIN departments d ON e.department_id = d.department_id;`
 
-			ops, err := FindOperations(query)
+			ops, err := ExtractQueryStatements(query)
 			require.NoError(t, err)
-			require.ElementsMatch(t, ops, []Operation{
+			require.ElementsMatch(t, ops, []QueryStatement{
 				{Type: Select, Table: "employees", Column: "employee_id"},
 				{Type: Select, Table: "employees", Column: "first_name"},
 				{Type: Select, Table: "departments", Column: "department_name"},
@@ -592,9 +608,9 @@ SELECT e.first_name, p.project_name
 FROM employees e
 CROSS JOIN projects p;`
 
-			ops, err := FindOperations(query)
+			ops, err := ExtractQueryStatements(query)
 			require.NoError(t, err)
-			require.ElementsMatch(t, ops, []Operation{
+			require.ElementsMatch(t, ops, []QueryStatement{
 				{Type: Select, Table: "employees", Column: "first_name"},
 				{Type: Select, Table: "projects", Column: "project_name"},
 			})
@@ -610,9 +626,9 @@ SELECT employee_id,
        END as salary_range
 FROM employees;`
 
-			ops, err := FindOperations(query)
+			ops, err := ExtractQueryStatements(query)
 			require.NoError(t, err)
-			require.ElementsMatch(t, ops, []Operation{
+			require.ElementsMatch(t, ops, []QueryStatement{
 				{Type: Select, Table: "employees", Column: "employee_id"},
 				{Type: Select, Table: "employees", Column: "salary"},
 			})
@@ -630,9 +646,9 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) j ON true;`
 
-			ops, err := FindOperations(query)
+			ops, err := ExtractQueryStatements(query)
 			require.NoError(t, err)
-			require.ElementsMatch(t, ops, []Operation{
+			require.ElementsMatch(t, ops, []QueryStatement{
 				{Type: Select, Table: "employees", Column: "first_name"},
 				{Type: Select, Table: "employees", Column: "last_name"},
 				{Type: Select, Table: "employees", Column: "employee_id"},
@@ -677,9 +693,9 @@ JOIN DepartmentStatistics ds ON eh.department_id = ds.department_id
 LEFT JOIN RecentHighEarners rhe ON eh.employee_id = rhe.employee_id
 ORDER BY eh.depth DESC, ds.avg_salary DESC;`
 
-			ops, err := FindOperations(query)
+			ops, err := ExtractQueryStatements(query)
 			require.NoError(t, err)
-			require.ElementsMatch(t, ops, []Operation{
+			require.ElementsMatch(t, ops, []QueryStatement{
 				// EmployeeHierarchy CTE operations
 				{Type: Select, Table: "employees", Column: "employee_id"},
 				{Type: Select, Table: "employees", Column: "manager_id"},
@@ -713,9 +729,9 @@ WHERE department_id IN (
     )
 );`
 
-			ops, err := FindOperations(query)
+			ops, err := ExtractQueryStatements(query)
 			require.NoError(t, err)
-			require.ElementsMatch(t, ops, []Operation{
+			require.ElementsMatch(t, ops, []QueryStatement{
 				{Type: Update, Table: "employees", Column: "salary"},
 				{Type: Select, Table: "employees", Column: "department_id"},
 				{Type: Select, Table: "departments", Column: "department_id"},
@@ -737,9 +753,9 @@ INSERT INTO high_salary_departments (department_id, avg_salary)
 SELECT department_id, avg_salary
 FROM HighAvgs;`
 
-			ops, err := FindOperations(query)
+			ops, err := ExtractQueryStatements(query)
 			require.NoError(t, err)
-			require.ElementsMatch(t, ops, []Operation{
+			require.ElementsMatch(t, ops, []QueryStatement{
 				{Type: Select, Table: "employees", Column: "department_id"},
 				{Type: Select, Table: "employees", Column: "salary"},
 				{Type: Insert, Table: "high_salary_departments", Column: "department_id"},
@@ -758,9 +774,9 @@ WHERE employee_id IN (
     HAVING COUNT(p.project_id) < 2
 );`
 
-			ops, err := FindOperations(query)
+			ops, err := ExtractQueryStatements(query)
 			require.NoError(t, err)
-			require.ElementsMatch(t, ops, []Operation{
+			require.ElementsMatch(t, ops, []QueryStatement{
 				{Type: Delete, Table: "employees", Column: "employee_id"},
 				{Type: Select, Table: "employees", Column: "employee_id"},
 				{Type: Join, Table: "employees", Column: "employee_id"},

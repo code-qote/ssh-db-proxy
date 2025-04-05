@@ -73,9 +73,30 @@ func main() {
 				},
 				Actions: abac.Notify,
 			},
-			"blocked-users": {
+			//"blocked-users": {
+			//	Conditions: []abac.Condition{
+			//		&abac.DatabaseUsernameCondition{Regexps: []string{"not_niqote"}},
+			//	},
+			//	Actions: abac.Notify | abac.NotPermit,
+			//},
+			"insert-into-table": {
+				Conditions: []abac.Condition{
+					&abac.QueryCondition{
+						StatementType: "insert",
+						TableRegexps:  []string{"table.*"},
+						ColumnRegexps: []string{".*"},
+					},
+				},
+				Actions: abac.Notify,
+			},
+			"delete-from-table": {
 				Conditions: []abac.Condition{
 					&abac.DatabaseUsernameCondition{Regexps: []string{"not_niqote"}},
+					&abac.QueryCondition{
+						StatementType: "delete",
+						TableRegexps:  []string{"table.*"},
+						ColumnRegexps: []string{".*"},
+					},
 				},
 				Actions: abac.Notify | abac.NotPermit,
 			},

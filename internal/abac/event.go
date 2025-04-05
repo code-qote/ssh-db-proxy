@@ -1,33 +1,44 @@
 package abac
 
-import "time"
+import (
+	"time"
+
+	"ssh-db-proxy/internal/sqlparser"
+)
 
 type Event = func(state *State) error
 
 func DatabaseNameEvent(name string) Event {
 	return func(state *State) error {
-		state.DatabaseName = name
+		state.DatabaseName = optional[string]{name, true}
 		return nil
 	}
 }
 
 func DatabaseUsernameEvent(username string) Event {
 	return func(state *State) error {
-		state.DatabaseUsername = username
+		state.DatabaseUsername = optional[string]{username, true}
 		return nil
 	}
 }
 
 func IPEvent(ip string) Event {
 	return func(state *State) error {
-		state.IP = ip
+		state.IP = optional[string]{ip, true}
 		return nil
 	}
 }
 
 func TimeEvent(t time.Time) Event {
 	return func(state *State) error {
-		state.Time = t
+		state.Time = optional[time.Time]{t, true}
+		return nil
+	}
+}
+
+func QueryStatementsEvent(statements []sqlparser.QueryStatement) Event {
+	return func(state *State) error {
+		state.QueryStatements = append(state.QueryStatements, statements...)
 		return nil
 	}
 }

@@ -36,6 +36,18 @@ func (a *ABAC) NewState() string {
 	return id
 }
 
+func (a *ABAC) NewStateFrom(stateID string) string {
+	id := uuid.New().String()
+	a.mu.Lock()
+	if old, ok := a.states[stateID]; ok {
+		a.states[id] = old.Copy()
+	} else {
+		a.states[id] = &State{}
+	}
+	a.mu.Unlock()
+	return id
+}
+
 func (a *ABAC) DeleteState(id string) {
 	a.mu.Lock()
 	delete(a.states, id)
