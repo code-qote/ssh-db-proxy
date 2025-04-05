@@ -49,36 +49,6 @@ func FindOperations(query string) ([]Operation, error) {
 		operations    = make(map[Operation]struct{})
 	)
 
-	handleFrom := func(statement state, from []*pg_query.Node) (currentTable string) {
-		var item *pg_query.Node
-		for len(from) > 0 {
-			item, from = from[0], from[1:]
-			if item == nil {
-				continue
-			}
-			switch node := item.Node.(type) {
-			case *pg_query.Node_RangeVar:
-				if node.RangeVar.Alias != nil {
-					tableAliases[node.RangeVar.Alias.Aliasname] = node.RangeVar.Relname
-					tables[node.RangeVar.Alias.Aliasname] = struct{}{}
-				} else {
-					tableAliases[node.RangeVar.Relname] = node.RangeVar.Relname
-					tables[node.RangeVar.Relname] = struct{}{}
-				}
-				if currentTable == "" {
-					currentTable = node.RangeVar.Relname
-				}
-			case *pg_query.Node_JoinExpr:
-				from = append(from, node.JoinExpr.Larg)
-				from = append(from, node.JoinExpr.Rarg)
-				statements = append(statements, state{Join, statement.Table, node.JoinExpr.Quals})
-			default:
-				statements = append(statements, withNode(statement, item))
-			}
-		}
-		return
-	}
-
 	handleRelation := func(relation *pg_query.RangeVar) (currentTable string) {
 		if relation == nil {
 			return
@@ -91,6 +61,30 @@ func FindOperations(query string) ([]Operation, error) {
 			tables[relation.Relname] = struct{}{}
 		}
 		return relation.Relname
+	}
+
+	handleFrom := func(statement state, from []*pg_query.Node) (currentTable string) {
+		var item *pg_query.Node
+		for len(from) > 0 {
+			item, from = from[0], from[1:]
+			if item == nil {
+				continue
+			}
+			switch node := item.Node.(type) {
+			case *pg_query.Node_RangeVar:
+				rangeCurrentTable := handleRelation(node.RangeVar)
+				if currentTable == "" {
+					currentTable = rangeCurrentTable
+				}
+			case *pg_query.Node_JoinExpr:
+				from = append(from, node.JoinExpr.Larg)
+				from = append(from, node.JoinExpr.Rarg)
+				statements = append(statements, state{Join, statement.Table, node.JoinExpr.Quals})
+			default:
+				statements = append(statements, withNode(statement, item))
+			}
+		}
+		return
 	}
 
 	statements = append(statements, sliceMap(root.Stmts, func(item *pg_query.RawStmt) state { return state{NoOp, "", item.Stmt} })...)
