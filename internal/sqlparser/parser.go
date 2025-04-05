@@ -43,6 +43,7 @@ func FindOperations(query string) ([]Operation, error) {
 	var (
 		tableAliases  = make(map[string]string)
 		columnAliases = make(map[string]struct{})
+		ctes          = make(map[string]struct{})
 		tables        = make(map[string]struct{})
 		statements    = make([]state, 0, len(root.Stmts))
 		operations    = make(map[Operation]struct{})
@@ -110,10 +111,13 @@ func FindOperations(query string) ([]Operation, error) {
 				if op.Type == Select && op.Table == "" {
 					continue
 				}
-				if op.Type == Join && tableProvided && op.Table == "" {
+				if tableProvided && op.Table == "" {
 					continue
 				}
 				if _, ok := columnAliases[op.Column]; ok && op.Table == "" {
+					continue
+				}
+				if _, ok := ctes[op.Table]; ok {
 					continue
 				}
 				operations[op] = struct{}{}
@@ -121,7 +125,7 @@ func FindOperations(query string) ([]Operation, error) {
 		case *pg_query.Node_ResTarget:
 			if stmt.ResTarget.Name != "" {
 				switch statement.Type {
-				case Update:
+				case Update, Insert:
 					statements = append(statements, withNode(statement, &pg_query.Node{
 						Node: &pg_query.Node_ColumnRef{
 							ColumnRef: &pg_query.ColumnRef{
@@ -146,13 +150,15 @@ func FindOperations(query string) ([]Operation, error) {
 				for _, item := range selectStmt.TargetList {
 					statements = append(statements, state{Select, currentTable, item})
 				}
-				if selectStmt.WhereClause != nil {
-					statements = append(statements, state{Select, currentTable, selectStmt.WhereClause})
+				for _, val := range selectStmt.ValuesLists {
+					statements = append(statements, state{Select, currentTable, val})
 				}
+				statements = append(statements, state{Select, currentTable, selectStmt.WhereClause})
+				statements = append(statements, state{Select, currentTable, selectStmt.HavingClause})
 				if selectStmt.WithClause != nil {
-					//for _, item := range selectStmt.WithClause.Ctes {
-					//	statements = append(statements, item)
-					//}
+					for _, cte := range selectStmt.WithClause.Ctes {
+						statements = append(statements, withNode(statement, cte))
+					}
 				}
 			case pg_query.SetOperation_SETOP_UNION, pg_query.SetOperation_SETOP_EXCEPT, pg_query.SetOperation_SETOP_INTERSECT:
 				statements = append(statements, withNode(statement, &pg_query.Node{Node: &pg_query.Node_SelectStmt{SelectStmt: selectStmt.Larg}}))
@@ -175,22 +181,87 @@ func FindOperations(query string) ([]Operation, error) {
 			for _, target := range updateStmt.TargetList {
 				statements = append(statements, state{Update, currentTable, target})
 			}
-			if updateStmt.WhereClause != nil {
-				statements = append(statements, state{Select, currentTable, updateStmt.WhereClause})
+			statements = append(statements, state{Select, currentTable, updateStmt.WhereClause})
+			for _, returning := range updateStmt.ReturningList {
+				statements = append(statements, state{Select, currentTable, returning})
 			}
 			if updateStmt.WithClause != nil {
-				//for _, item := range updateStmt.WithClause.Ctes {
-				//	statements = append(statements, item)
-				//}
+				for _, cte := range updateStmt.WithClause.Ctes {
+					statements = append(statements, withNode(statement, cte))
+				}
 			}
 		case *pg_query.Node_DeleteStmt:
-			//if stmt.DeleteStmt.WhereClause != nil {
-			//	conditions = append(conditions, stmt.DeleteStmt.WhereClause)
-			//}
+			var currentTable string
+			deleteStmt := stmt.DeleteStmt
+			if deleteStmt.Relation != nil {
+				if deleteStmt.Relation.Alias != nil {
+					tableAliases[deleteStmt.Relation.Alias.Aliasname] = deleteStmt.Relation.Relname
+					tables[deleteStmt.Relation.Alias.Aliasname] = struct{}{}
+				} else {
+					tableAliases[deleteStmt.Relation.Relname] = deleteStmt.Relation.Relname
+					tables[deleteStmt.Relation.Relname] = struct{}{}
+				}
+				currentTable = deleteStmt.Relation.Relname
+			}
+			if deleteStmt.WhereClause != nil {
+				statements = append(statements, state{Delete, currentTable, deleteStmt.WhereClause})
+			}
+			for _, returning := range deleteStmt.ReturningList {
+				statements = append(statements, state{Select, currentTable, returning})
+			}
+			for _, using := range deleteStmt.UsingClause {
+				statements = append(statements, state{Select, currentTable, using})
+			}
+			if deleteStmt.WithClause != nil {
+				for _, cte := range deleteStmt.WithClause.Ctes {
+					statements = append(statements, withNode(statement, cte))
+				}
+			}
 		case *pg_query.Node_InsertStmt:
+			var currentTable string
+			insertStmt := stmt.InsertStmt
+			if insertStmt.Relation != nil {
+				if insertStmt.Relation.Alias != nil {
+					tableAliases[insertStmt.Relation.Alias.Aliasname] = insertStmt.Relation.Relname
+					tables[insertStmt.Relation.Alias.Aliasname] = struct{}{}
+				} else {
+					tableAliases[insertStmt.Relation.Relname] = insertStmt.Relation.Relname
+					tables[insertStmt.Relation.Relname] = struct{}{}
+				}
+				currentTable = insertStmt.Relation.Relname
+			}
+			statements = append(statements, withNode(statement, stmt.InsertStmt.SelectStmt))
+			for _, col := range stmt.InsertStmt.Cols {
+				statements = append(statements, state{Insert, currentTable, col})
+			}
+			for _, node := range stmt.InsertStmt.ReturningList {
+				statements = append(statements, state{Select, currentTable, node})
+			}
+			if insertStmt.WithClause != nil {
+				for _, cte := range insertStmt.WithClause.Ctes {
+					statements = append(statements, withNode(statement, cte))
+				}
+			}
+			if stmt.InsertStmt.OnConflictClause != nil {
+				statements = append(statements, state{Select, currentTable, stmt.InsertStmt.OnConflictClause.WhereClause})
+				for _, col := range stmt.InsertStmt.OnConflictClause.TargetList {
+					statements = append(statements, state{Update, currentTable, col})
+				}
+				if stmt.InsertStmt.OnConflictClause.Infer != nil {
+					statements = append(statements, state{Select, currentTable, stmt.InsertStmt.OnConflictClause.Infer.WhereClause})
+					for _, elem := range stmt.InsertStmt.OnConflictClause.Infer.IndexElems {
+						statements = append(statements, state{Select, currentTable, elem})
+					}
+				}
+			}
 		case *pg_query.Node_FuncCall:
 			for _, arg := range stmt.FuncCall.Args {
 				statements = append(statements, withNode(statement, arg))
+			}
+			if stmt.FuncCall.Over != nil {
+				for _, partition := range stmt.FuncCall.Over.PartitionClause {
+					statements = append(statements, withNode(statement, partition))
+				}
 			}
 		case *pg_query.Node_CaseExpr:
 			for _, arg := range stmt.CaseExpr.Args {
@@ -214,10 +285,22 @@ func FindOperations(query string) ([]Operation, error) {
 			statements = append(statements, withNode(statement, stmt.AExpr.Rexpr))
 		case *pg_query.Node_RangeSubselect:
 			statements = append(statements, withNode(statement, stmt.RangeSubselect.Subquery))
+		case *pg_query.Node_BoolExpr:
+			for _, arg := range stmt.BoolExpr.Args {
+				statements = append(statements, withNode(statement, arg))
+			}
+		case *pg_query.Node_NullTest:
+			statements = append(statements, withNode(statement, stmt.NullTest.Arg))
+		case *pg_query.Node_NullIfExpr:
+			for _, arg := range stmt.NullIfExpr.Args {
+				statements = append(statements, withNode(statement, arg))
+			}
+		case *pg_query.Node_CommonTableExpr:
+			ctes[stmt.CommonTableExpr.Ctename] = struct{}{}
+			statements = append(statements, withNode(statement, stmt.CommonTableExpr.Ctequery))
 		}
 	}
-
-	preResult := make(map[Operation]struct{})
+	preResult := make(map[Operation]struct{}, len(operations))
 	for op := range operations {
 		if _, ok := columnAliases[op.Column]; ok && op.currentTable {
 			delete(operations, op)
