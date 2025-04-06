@@ -128,6 +128,7 @@ func (m *MITM) Proxy(ctx context.Context) error {
 	if disconnect {
 		return ErrDisconnectUser
 	}
+	fmt.Println("LOOOOOOL")
 	return nil
 }
 
@@ -324,10 +325,10 @@ func (m *MITM) onQuery(query string) error {
 		m.logger.Errorf("extract query statements: %s", err)
 		return nil
 	}
-	stateID := m.abac.NewStateFrom(m.metadata.StateID)
+	stateID := m.abac.NewStateFrom(m.metadata.StateID, nil)
 	defer m.abac.DeleteState(stateID)
 
-	actions, err := m.abac.Observe(stateID, abac.QueryStatementsEvent(queryStatements))
+	actions, rules, err := m.abac.Observe(stateID, abac.QueryStatementsEvent(queryStatements))
 	if err != nil {
 		m.logger.Errorf("observe query statements: %s", err)
 	}
@@ -344,20 +345,20 @@ func (m *MITM) onQuery(query string) error {
 		data.Query = query
 	}
 	if actions&abac.Notify > 0 {
-		m.auditor.OnNotify("query statements observed", data)
+		m.auditor.OnNotify("query statements observed", rules, data)
 	}
 	if actions&abac.Disconnect > 0 {
 		if err := m.frontend.Send(&pgproto3.Terminate{}); err != nil {
 			return err
 		}
 		if actions&abac.Notify > 0 {
-			m.auditor.OnNotify("user was disconnected from database because of the query", data)
+			m.auditor.OnNotify("user was disconnected from database because of the query", rules, data)
 		}
 		return ErrDisconnectUser
 	}
 	if actions&abac.NotPermit > 0 {
 		if actions&abac.Notify > 0 {
-			m.auditor.OnNotify("query was not permitted", data)
+			m.auditor.OnNotify("query was not permitted", rules, data)
 		}
 		return ErrUserPermissionDenied
 	}
@@ -389,25 +390,8 @@ func (m *MITM) connectToDatabase(ctx context.Context, frontendParameters map[str
 		return authError
 	}
 
-	actions, err := m.abac.Observe(m.metadata.StateID, abac.DatabaseNameEvent(database), abac.DatabaseUsernameEvent(user))
-	if err == nil {
-		if actions&abac.Notify > 0 {
-			m.auditor.OnNotify(fmt.Sprintf("user %s connecting to %s", user, database), m.metadata)
-		}
-		if actions&abac.Disconnect > 0 {
-			if actions&abac.Notify > 0 {
-				m.auditor.OnNotify(fmt.Sprintf("user %s was not permitted to connect to %s and disconnected", user, database), m.metadata)
-			}
-			return fmt.Errorf("%w: forbidden username by administrator", ErrDisconnectUser)
-		}
-		if actions&abac.NotPermit > 0 || actions&abac.Disconnect > 0 {
-			if actions&abac.Notify > 0 {
-				m.auditor.OnNotify(fmt.Sprintf("user %s was not permitted to connect to %s", user, database), m.metadata)
-			}
-			return fmt.Errorf("%w: forbidden username by administrator", ErrUserPermissionDenied)
-		}
-	} else {
-		m.logger.Errorw("failed to observe", "state-id", m.metadata.StateID, "err", err)
+	if err := m.observeConnection(user, database); err != nil {
+		return err
 	}
 
 	cert, err := m.certIssuer.Issue(user)
@@ -447,6 +431,30 @@ func (m *MITM) connectToDatabase(ctx context.Context, frontendParameters map[str
 		ProcessID:         hijackedConn.PID,
 		SecretKey:         hijackedConn.SecretKey,
 		ParameterStatuses: hijackedConn.ParameterStatuses,
+	}
+	return nil
+}
+
+func (m *MITM) observeConnection(user, database string) error {
+	actions, rules, err := m.abac.Observe(m.metadata.StateID, abac.DatabaseNameEvent(database), abac.DatabaseUsernameEvent(user))
+	if err == nil {
+		if actions&abac.Notify > 0 {
+			m.auditor.OnNotify(fmt.Sprintf("user %s connecting to %s", user, database), rules, m.metadata)
+		}
+		if actions&abac.Disconnect > 0 {
+			if actions&abac.Notify > 0 {
+				m.auditor.OnNotify(fmt.Sprintf("user %s was not permitted to connect to %s and disconnected", user, database), rules, m.metadata)
+			}
+			return fmt.Errorf("%w: forbidden username by administrator", ErrDisconnectUser)
+		}
+		if actions&abac.NotPermit > 0 {
+			if actions&abac.Notify > 0 {
+				m.auditor.OnNotify(fmt.Sprintf("user %s was not permitted to connect to %s", user, database), rules, m.metadata)
+			}
+			return fmt.Errorf("%w: forbidden username by administrator", ErrUserPermissionDenied)
+		}
+	} else {
+		m.logger.Errorw("failed to observe", "state-id", m.metadata.StateID, "err", err)
 	}
 	return nil
 }

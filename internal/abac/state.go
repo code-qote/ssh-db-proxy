@@ -11,22 +11,25 @@ type optional[T any] struct {
 	set   bool
 }
 
-type State struct {
-	DatabaseUsername optional[string]
-	IP               optional[string]
-	DatabaseName     optional[string]
-	Time             optional[time.Time]
-	QueryStatements  []sql.QueryStatement
+type state struct {
+	databaseUsername optional[string]
+	ip               optional[string]
+	databaseName     optional[string]
+	time             optional[time.Time]
+	queryStatements  []sql.QueryStatement
+
+	onUpdate func()
 }
 
-func (s *State) Copy() *State {
-	queryStatements := make([]sql.QueryStatement, len(s.QueryStatements))
-	copy(queryStatements, s.QueryStatements)
-	return &State{
-		DatabaseUsername: s.DatabaseUsername,
-		IP:               s.IP,
-		DatabaseName:     s.DatabaseName,
-		Time:             s.Time,
-		QueryStatements:  queryStatements,
+func (s *state) Copy() *state {
+	queryStatements := make([]sql.QueryStatement, len(s.queryStatements))
+	copy(queryStatements, s.queryStatements)
+	return &state{
+		databaseUsername: s.databaseUsername,
+		ip:               s.ip,
+		databaseName:     s.databaseName,
+		time:             s.time,
+		queryStatements:  queryStatements,
+		onUpdate:         s.onUpdate,
 	}
 }

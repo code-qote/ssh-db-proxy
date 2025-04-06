@@ -9,7 +9,7 @@ import (
 
 type Auditor interface {
 	OnConnectionAccept(connID, localAddress, remoteAddress string)
-	OnNotify(message string, data metadata.Metadata)
+	OnNotify(message string, matchedRules []string, data metadata.Metadata)
 	OnAuthCertificate(cert *ssh.Certificate)
 	OnDatabaseUsers(connID string, users []string)
 	OnDirectTCPIPRequest(connID, requestID string)

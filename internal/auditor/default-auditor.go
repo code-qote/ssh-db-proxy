@@ -73,28 +73,32 @@ func (a *DefaultAuditor) OnDirectTCPIPRequest(connID, requestID string) {
 }
 
 type event struct {
-	Time     time.Time         `json:"time"`
-	Message  string            `json:"message"`
-	Metadata metadata.Metadata `json:"metadata"`
+	Time         time.Time         `json:"time"`
+	Message      string            `json:"message"`
+	MatchedRules []string          `json:"matched_rules"`
+	Metadata     metadata.Metadata `json:"metadata"`
 }
 
 func (e *event) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Time     time.Time         `json:"time"`
-		Message  string            `json:"message"`
-		Metadata metadata.Metadata `json:"metadata"`
+		Time         time.Time         `json:"time"`
+		Message      string            `json:"message"`
+		MatchedRules []string          `json:"matched_rules"`
+		Metadata     metadata.Metadata `json:"metadata"`
 	}{
-		Time:     e.Time,
-		Message:  e.Message,
-		Metadata: e.Metadata,
+		Time:         e.Time,
+		Message:      e.Message,
+		MatchedRules: e.MatchedRules,
+		Metadata:     e.Metadata,
 	})
 }
 
-func (a *DefaultAuditor) OnNotify(message string, data metadata.Metadata) {
+func (a *DefaultAuditor) OnNotify(message string, matchedRules []string, data metadata.Metadata) {
 	e := &event{
-		Time:     time.Now(),
-		Message:  message,
-		Metadata: data,
+		Time:         time.Now(),
+		Message:      message,
+		MatchedRules: matchedRules,
+		Metadata:     data,
 	}
 	d, err := e.MarshalJSON()
 	if err == nil {

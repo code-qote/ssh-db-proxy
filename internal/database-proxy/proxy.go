@@ -119,7 +119,7 @@ func NewDatabaseProxy(config *config.Config, auditor auditor.Auditor, logger *za
 	}
 	sshConfig.AddHostKey(privateKey)
 
-	a, err := abac.New(config.ABACRules)
+	a, err := abac.New(*config.ABACRules.Load())
 	if err != nil {
 		return nil, fmt.Errorf("create abac: %w", err)
 	}
@@ -134,14 +134,21 @@ func NewDatabaseProxy(config *config.Config, auditor auditor.Auditor, logger *za
 		databaseCACertPool: certPool}, nil
 }
 
-func (t *DatabaseProxy) Serve(ctx context.Context) error {
-	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%s", t.c.Host, t.c.Port))
+func (proxy *DatabaseProxy) Serve(ctx context.Context) error {
+	if proxy.c.HotReload.Enabled {
+		proxy.logger.Infof("hot reload is enabled")
+		go pprof.Do(ctx, pprof.Labels("name", "config-hot-reloading"), func(ctx context.Context) {
+			proxy.hotReloadConfig(ctx, proxy.c, proxy.logger.With("name", "config-hot-reloading"))
+		})
+	}
+
+	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%s", proxy.c.Host, proxy.c.Port))
 	if err != nil {
 		return err
 	}
 	defer listener.Close()
 
-	conns := t.acceptConnections(ctx, listener)
+	conns := proxy.acceptConnections(ctx, listener)
 	var wg sync.WaitGroup
 
 loop:
@@ -154,11 +161,11 @@ loop:
 			go pprof.Do(ctx, pprof.Labels("name", "handle-connection"), func(ctx context.Context) {
 				defer wg.Done()
 				ctx = context.Background()
-				if err := t.handleConnection(ctx, conn); err != nil {
+				if err := proxy.handleConnection(ctx, conn); err != nil {
 					if errors.Is(err, ErrAuthError) {
-						t.logger.Info(err)
+						proxy.logger.Info(err)
 					}
-					t.logger.Error(err)
+					proxy.logger.Error(err)
 				}
 			})
 		}
@@ -167,7 +174,7 @@ loop:
 	return nil
 }
 
-func (t *DatabaseProxy) acceptConnections(ctx context.Context, listener net.Listener) <-chan ConnWithMetadata {
+func (proxy *DatabaseProxy) acceptConnections(ctx context.Context, listener net.Listener) <-chan ConnWithMetadata {
 	ch := make(chan ConnWithMetadata)
 	go pprof.Do(ctx, pprof.Labels("name", "accept-connections"), func(ctx context.Context) {
 		for {
@@ -176,34 +183,27 @@ func (t *DatabaseProxy) acceptConnections(ctx context.Context, listener net.List
 				break
 			}
 			id := uuid.New().String()
-			t.logger.Infow("accepted connection", "id", id)
+			proxy.logger.Infow("accepted connection", "id", id)
 			connWithMetadata := ConnWithMetadata{
 				Conn: conn,
 				Metadata: metadata.Metadata{
 					ConnectionID: id,
-					StateID:      t.abac.NewState(),
 					RemoteAddr:   conn.RemoteAddr().String(),
 				},
 			}
-			actions, err := t.abac.Observe(connWithMetadata.Metadata.StateID, abac.IPEvent(conn.RemoteAddr().String()), abac.TimeEvent(time.Now()))
-			if err == nil {
-				if actions&abac.Notify > 0 {
-					t.auditor.OnNotify("got-connection", connWithMetadata.Metadata)
-				}
-				if actions&abac.NotPermit > 0 || actions&abac.Disconnect > 0 {
-					if actions&abac.Notify > 0 {
-						t.auditor.OnNotify("not-permitted-connection", connWithMetadata.Metadata)
-					}
-					if err := conn.Close(); err != nil {
-						t.logger.Errorw("failed to close connection", "id", connWithMetadata.Metadata.ConnectionID, "err", err)
+			connWithMetadata.Metadata.StateID = proxy.abac.NewState(func() {
+				if err := proxy.observeConnection(&connWithMetadata); err != nil {
+					if errors.Is(err, mitm.ErrDisconnectUser) {
+						connWithMetadata.Conn.Close()
 					}
 					return
 				}
-			} else {
-				t.logger.Errorw("failed to observe", "state-id", connWithMetadata.Metadata.StateID, "err", err)
+			})
+			if err := proxy.observeConnection(&connWithMetadata); err != nil {
+				return
 			}
 			go pprof.Do(ctx, pprof.Labels("name", "on-connection-accept-event"), func(ctx context.Context) {
-				t.auditor.OnConnectionAccept(id, conn.LocalAddr().String(), conn.RemoteAddr().String())
+				proxy.auditor.OnConnectionAccept(id, conn.LocalAddr().String(), conn.RemoteAddr().String())
 			})
 			ch <- connWithMetadata
 		}
@@ -212,20 +212,41 @@ func (t *DatabaseProxy) acceptConnections(ctx context.Context, listener net.List
 	return ch
 }
 
-func (t *DatabaseProxy) handleConnection(ctx context.Context, conn ConnWithMetadata) error {
-	sConn, newChans, reqs, err := ssh.NewServerConn(conn.Conn, t.sshConfig)
+func (proxy *DatabaseProxy) observeConnection(connWithMetadata *ConnWithMetadata) error {
+	actions, rules, err := proxy.abac.Observe(connWithMetadata.Metadata.StateID, abac.IPEvent(connWithMetadata.Conn.RemoteAddr().String()), abac.TimeEvent(time.Now()))
+	if err == nil {
+		if actions&abac.Notify > 0 {
+			proxy.auditor.OnNotify("got-connection", rules, connWithMetadata.Metadata)
+		}
+		if actions&abac.NotPermit > 0 || actions&abac.Disconnect > 0 {
+			if actions&abac.Notify > 0 {
+				proxy.auditor.OnNotify("not-permitted-connection", rules, connWithMetadata.Metadata)
+			}
+			if err := connWithMetadata.Conn.Close(); err != nil {
+				proxy.logger.Errorw("failed to close connection", "id", connWithMetadata.Metadata.ConnectionID, "err", err)
+			}
+			return mitm.ErrDisconnectUser
+		}
+	} else {
+		proxy.logger.Errorw("failed to observe", "state-id", connWithMetadata.Metadata.StateID, "err", err)
+	}
+	return nil
+}
+
+func (proxy *DatabaseProxy) handleConnection(ctx context.Context, conn ConnWithMetadata) error {
+	sConn, newChans, reqs, err := ssh.NewServerConn(conn.Conn, proxy.sshConfig)
 	if err != nil {
 		return fmt.Errorf("handshake failed: %w", err)
 	}
 	defer func() {
-		t.logger.Infow("closed connection", "id", conn.Metadata.ConnectionID)
+		proxy.logger.Infow("closed connection", "id", conn.Metadata.ConnectionID)
 		go pprof.Do(ctx, pprof.Labels("name", "on-closed-connection-event"), func(ctx context.Context) {
 			err := sConn.Close()
 			if strings.Contains(err.Error(), "use of closed network connection") {
 				err = nil
 			}
-			t.auditor.OnConnectionClosed(conn.Metadata.ConnectionID, err)
-			t.abac.DeleteState(conn.Metadata.StateID)
+			proxy.auditor.OnConnectionClosed(conn.Metadata.ConnectionID, err)
+			proxy.abac.DeleteState(conn.Metadata.StateID)
 		})
 	}()
 
@@ -235,7 +256,7 @@ func (t *DatabaseProxy) handleConnection(ctx context.Context, conn ConnWithMetad
 	}
 	databaseUsers := strings.Split(databaseUsersString, ",")
 	go pprof.Do(ctx, pprof.Labels("name", "on-database-users-event"), func(ctx context.Context) {
-		t.auditor.OnDatabaseUsers(conn.Metadata.ConnectionID, databaseUsers)
+		proxy.auditor.OnDatabaseUsers(conn.Metadata.ConnectionID, databaseUsers)
 	})
 
 	go ssh.DiscardRequests(reqs)
@@ -246,15 +267,15 @@ func (t *DatabaseProxy) handleConnection(ctx context.Context, conn ConnWithMetad
 		wg.Add(1)
 		go pprof.Do(ctx, pprof.Labels("name", "handle-new-channel"), func(ctx context.Context) {
 			defer wg.Done()
-			err := t.handleChannel(ctx, conn.Metadata, databaseUsers, newChan, conn.Conn.LocalAddr(), conn.Conn.RemoteAddr())
+			err := proxy.handleChannel(ctx, conn.Metadata, databaseUsers, newChan, conn.Conn.LocalAddr(), conn.Conn.RemoteAddr())
 			if err != nil {
 				if errors.Is(err, mitm.ErrDisconnectUser) {
 					if err := conn.Conn.Close(); err != nil {
-						t.logger.Errorw("failed to close connection", "id", conn.Metadata.ConnectionID, "err", err)
+						proxy.logger.Errorw("failed to close connection", "id", conn.Metadata.ConnectionID, "err", err)
 						return
 					}
 				}
-				t.logger.Errorf("handle channel: %v", err)
+				proxy.logger.Errorf("handle channel: %v", err)
 			}
 		})
 	}
@@ -262,7 +283,7 @@ func (t *DatabaseProxy) handleConnection(ctx context.Context, conn ConnWithMetad
 	return nil
 }
 
-func (t *DatabaseProxy) handleChannel(ctx context.Context, metadata metadata.Metadata, databaseUsers []string, newChan ssh.NewChannel, localAddr, remoteAddr net.Addr) error {
+func (proxy *DatabaseProxy) handleChannel(ctx context.Context, metadata metadata.Metadata, databaseUsers []string, newChan ssh.NewChannel, localAddr, remoteAddr net.Addr) error {
 	if newChan.ChannelType() != "direct-tcpip" {
 		if err := newChan.Reject(ssh.UnknownChannelType, "unsupported channel type"); err != nil {
 			return fmt.Errorf("reject channel: %w", err)
@@ -271,12 +292,12 @@ func (t *DatabaseProxy) handleChannel(ctx context.Context, metadata metadata.Met
 	}
 	requestID := uuid.New().String()
 	metadata.RequestID = requestID
-	t.logger.Infow("accepted new request", "id", requestID)
+	proxy.logger.Infow("accepted new request", "id", requestID)
 	defer func() {
-		t.logger.Infow("finished request", "id", requestID)
+		proxy.logger.Infow("finished request", "id", requestID)
 	}()
 	go pprof.Do(ctx, pprof.Labels("name", "on-direct-tcpip-request-event"), func(ctx context.Context) {
-		t.auditor.OnDirectTCPIPRequest(metadata.ConnectionID, requestID)
+		proxy.auditor.OnDirectTCPIPRequest(metadata.ConnectionID, requestID)
 	})
 
 	ch, reqs, err := newChan.Accept()
@@ -297,10 +318,34 @@ func (t *DatabaseProxy) handleChannel(ctx context.Context, metadata metadata.Met
 		ch:         ch,
 		localAddr:  localAddr,
 		remoteAddr: remoteAddr,
-	}, p.HostToConnect, p.PortToConnect, t.certIssuer, t.databaseCACertPool, t.auditor, t.abac, t.logger.With("name", "mitm", "connection-id", metadata.ConnectionID, "request-id", metadata.RequestID))
+	}, p.HostToConnect, p.PortToConnect, proxy.certIssuer, proxy.databaseCACertPool, proxy.auditor, proxy.abac, proxy.logger.With("name", "mitm", "connection-id", metadata.ConnectionID, "request-id", metadata.RequestID))
 	if err != nil {
 		return fmt.Errorf("create MITM: %w", err)
 	}
 
 	return m.Proxy(ctx)
+}
+
+func (proxy *DatabaseProxy) hotReloadConfig(ctx context.Context, conf *config.Config, logger *zap.SugaredLogger) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(conf.HotReload.Period):
+			newConfig, err := config.LoadConfig(conf.ConfigPath, conf)
+			if err != nil {
+				if !errors.Is(err, config.ErrConfigNotChanged) {
+					logger.Errorf("hot reload config from file %s: %s", conf.ConfigPath, err)
+				}
+				continue
+			}
+			conf = newConfig
+			if err := proxy.abac.Update(*conf.ABACRules.Load()); err != nil {
+				logger.Errorf("update ABAC: %s", err)
+				continue
+			}
+			proxy.c = conf
+			logger.Infof("hot reloaded config from file %s", conf.ConfigPath)
+		}
+	}
 }

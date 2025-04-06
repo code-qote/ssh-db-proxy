@@ -45,7 +45,7 @@ var validWeekdays = map[string]time.Weekday{
 
 type Condition interface {
 	Init() error
-	Matches(State) bool
+	Matches(state) bool
 }
 
 type Rule struct {
@@ -65,7 +65,7 @@ func (c *Rule) Init() error {
 	return nil
 }
 
-func (c *Rule) Matches(state State) (Action, error) {
+func (c *Rule) Matches(state state) (Action, error) {
 	if c == nil {
 		return 0, nil
 	}
@@ -99,16 +99,16 @@ func (c *IPCondition) Init() error {
 	return nil
 }
 
-func (c *IPCondition) Matches(state State) bool {
+func (c *IPCondition) Matches(state state) bool {
 	if c == nil {
 		return false
 	}
-	if !state.Time.set {
+	if !state.ip.set {
 		return false
 	}
-	ipAddr, err := net.ResolveIPAddr("ip6", state.IP.value)
+	ipAddr, err := net.ResolveIPAddr("ip6", state.ip.value)
 	if err != nil {
-		ipAddr, err = net.ResolveIPAddr("ip", state.IP.value)
+		ipAddr, err = net.ResolveIPAddr("ip", state.ip.value)
 		if err != nil {
 			return false
 		}
@@ -142,15 +142,15 @@ func (c *DatabaseUsernameCondition) Init() error {
 	return nil
 }
 
-func (c *DatabaseUsernameCondition) Matches(state State) bool {
+func (c *DatabaseUsernameCondition) Matches(state state) bool {
 	if c == nil {
 		return false
 	}
-	if !state.DatabaseUsername.set {
+	if !state.databaseUsername.set {
 		return false
 	}
 	for _, reg := range c.regexps {
-		if reg.MatchString(state.DatabaseUsername.value) {
+		if reg.MatchString(state.databaseUsername.value) {
 			return true
 		}
 	}
@@ -177,15 +177,15 @@ func (c *DatabaseNameCondition) Init() error {
 	return nil
 }
 
-func (c *DatabaseNameCondition) Matches(state State) bool {
+func (c *DatabaseNameCondition) Matches(state state) bool {
 	if c == nil {
 		return false
 	}
-	if !state.DatabaseName.set {
+	if !state.databaseName.set {
 		return false
 	}
 	for _, reg := range c.regexps {
-		if reg.MatchString(state.DatabaseName.value) {
+		if reg.MatchString(state.databaseName.value) {
 			return true
 		}
 	}
@@ -279,14 +279,14 @@ func (c *TimeCondition) Init() error {
 	return nil
 }
 
-func (c *TimeCondition) Matches(state State) bool {
+func (c *TimeCondition) Matches(state state) bool {
 	if c == nil {
 		return false
 	}
-	if !state.Time.set {
+	if !state.time.set {
 		return false
 	}
-	t := state.Time.value.In(c.location)
+	t := state.time.value.In(c.location)
 
 	if len(c.Weekday) > 0 {
 		weekdayMatches := false
@@ -376,14 +376,14 @@ func (c *TimeCondition) Matches(state State) bool {
 }
 
 type QueryCondition struct {
-	StatementType string
-	TableRegexps  []string
-	ColumnRegexps []string
-	Strict        bool
+	StatementType string   `yaml:"statement_type"`
+	TableRegexps  []string `yaml:"table_regexps"`
+	ColumnRegexps []string `yaml:"column_regexps"`
+	Strict        bool     `yaml:"strict"`
 
-	statementType sql.StatementType
-	tableRegexps  []*regexp.Regexp
-	columnRegexps []*regexp.Regexp
+	statementType sql.StatementType `yaml:"-"`
+	tableRegexps  []*regexp.Regexp  `yaml:"-"`
+	columnRegexps []*regexp.Regexp  `yaml:"-"`
 }
 
 func (c *QueryCondition) Init() error {
@@ -411,8 +411,8 @@ func (c *QueryCondition) Init() error {
 	return nil
 }
 
-func (c *QueryCondition) Matches(state State) bool {
-	for _, statement := range state.QueryStatements {
+func (c *QueryCondition) Matches(state state) bool {
+	for _, statement := range state.queryStatements {
 		if c.statementType != sql.NoOp {
 			if statement.Type != c.statementType {
 				continue

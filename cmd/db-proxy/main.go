@@ -11,7 +11,6 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	"ssh-db-proxy/internal/abac"
 	"ssh-db-proxy/internal/auditor"
 	"ssh-db-proxy/internal/config"
 	"ssh-db-proxy/internal/database-proxy"
@@ -42,6 +41,18 @@ func initLogger() *zap.SugaredLogger {
 }
 
 func main() {
+	if len(os.Args) < 3 {
+		panic("Usage: db-proxy --config <config_path>")
+	}
+	if os.Args[1] != "-c" && os.Args[1] != "--config" {
+		panic("Usage: db-proxy --config <config_path>")
+	}
+	configPath := os.Args[2]
+
+	conf, err := config.LoadConfig(configPath, nil)
+	if err != nil {
+		panic(err)
+	}
 	logger := initLogger()
 	defer logger.Sync()
 	zap.ReplaceGlobals(logger.Desugar())
@@ -52,56 +63,6 @@ func main() {
 		}
 	}()
 
-	conf := &config.Config{
-		Host:               "localhost",
-		Port:               "8080",
-		NoClientAuth:       false,
-		HostKeyPrivatePath: "/Users/niqote/ssh-db-proxy/dev/generated/ssh_host_rsa_key",
-		UserCAPath:         "/Users/niqote/ssh-db-proxy/dev/generated/user_ca.pub",
-		MITM: config.MITMConfig{
-			ClientCAFilePath:     "/Users/niqote/ssh-db-proxy/dev/generated/tls/proxy-ca.pem",
-			ClientPrivateKeyPath: "/Users/niqote/ssh-db-proxy/dev/generated/tls/proxy-ca.key",
-			DatabaseCAPath:       "/Users/niqote/ssh-db-proxy/dev/generated/tls/ca.pem",
-		},
-		ABACRules: map[string]*abac.Rule{
-			"night-time": {
-				Conditions: []abac.Condition{
-					&abac.TimeCondition{
-						Location: "Europe/Moscow",
-						Hour:     []abac.Interval{{From: 0, To: 9}, {From: 20, To: 23}},
-					},
-				},
-				Actions: abac.Notify,
-			},
-			//"blocked-users": {
-			//	Conditions: []abac.Condition{
-			//		&abac.DatabaseUsernameCondition{Regexps: []string{"not_niqote"}},
-			//	},
-			//	Actions: abac.Notify | abac.NotPermit,
-			//},
-			"insert-into-table": {
-				Conditions: []abac.Condition{
-					&abac.QueryCondition{
-						StatementType: "insert",
-						TableRegexps:  []string{"table.*"},
-						ColumnRegexps: []string{".*"},
-					},
-				},
-				Actions: abac.Notify,
-			},
-			"delete-from-table": {
-				Conditions: []abac.Condition{
-					&abac.DatabaseUsernameCondition{Regexps: []string{"not_niqote"}},
-					&abac.QueryCondition{
-						StatementType: "delete",
-						TableRegexps:  []string{"table.*"},
-						ColumnRegexps: []string{".*"},
-					},
-				},
-				Actions: abac.Notify | abac.NotPermit,
-			},
-		},
-	}
 	auditor := auditor.NewDefaultAuditor(func(audit *auditor.DefaultConnectionAudit) {
 		b, err := json.Marshal(audit)
 		if err == nil {
