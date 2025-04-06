@@ -41,18 +41,6 @@ func initLogger() *zap.SugaredLogger {
 }
 
 func main() {
-	if len(os.Args) < 3 {
-		panic("Usage: db-proxy --config <config_path>")
-	}
-	if os.Args[1] != "-c" && os.Args[1] != "--config" {
-		panic("Usage: db-proxy --config <config_path>")
-	}
-	configPath := os.Args[2]
-
-	conf, err := config.LoadConfig(configPath, nil)
-	if err != nil {
-		panic(err)
-	}
 	logger := initLogger()
 	defer logger.Sync()
 	zap.ReplaceGlobals(logger.Desugar())
@@ -63,6 +51,19 @@ func main() {
 		}
 	}()
 
+	if len(os.Args) < 3 {
+		logger.Fatalf("Usage: db-proxy --config <config_path>")
+	}
+	if os.Args[1] != "-c" && os.Args[1] != "--config" {
+		logger.Fatalf("Usage: db-proxy --config <config_path>")
+	}
+	configPath := os.Args[2]
+
+	conf, err := config.LoadConfig(configPath, nil)
+	if err != nil {
+		logger.Fatal(err)
+	}
+
 	auditor := auditor.NewDefaultAuditor(func(audit *auditor.DefaultConnectionAudit) {
 		b, err := json.Marshal(audit)
 		if err == nil {
@@ -71,7 +72,7 @@ func main() {
 	})
 	proxy, err := database_proxy.NewDatabaseProxy(conf, auditor, logger)
 	if err != nil {
-		panic(err)
+		logger.Fatal(err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
