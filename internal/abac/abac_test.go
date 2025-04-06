@@ -36,7 +36,7 @@ func TestABAC(t *testing.T) {
 		actions, names, err := abac.Observe(stateID, DatabaseNameEvent("bbb"))
 		require.NoError(t, err)
 		require.Empty(t, actions)
-		require.ElementsMatch(t, names, []string{"rule1"})
+		require.Empty(t, names)
 
 		actions, names, err = abac.Observe(stateID, DatabaseNameEvent("aaa"))
 		require.NoError(t, err)
