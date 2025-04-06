@@ -2,8 +2,6 @@ package abac
 
 import (
 	"time"
-
-	"ssh-db-proxy/internal/sqlparser"
 )
 
 type Event = func(state *State) error
@@ -36,7 +34,7 @@ func TimeEvent(t time.Time) Event {
 	}
 }
 
-func QueryStatementsEvent(statements []sqlparser.QueryStatement) Event {
+func QueryStatementsEvent(statements []sql.QueryStatement) Event {
 	return func(state *State) error {
 		state.QueryStatements = append(state.QueryStatements, statements...)
 		return nil

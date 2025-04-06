@@ -21,7 +21,7 @@ import (
 	"ssh-db-proxy/internal/auditor"
 	"ssh-db-proxy/internal/certissuer"
 	"ssh-db-proxy/internal/metadata"
-	"ssh-db-proxy/internal/sqlparser"
+	"ssh-db-proxy/internal/sql"
 )
 
 const (
@@ -319,7 +319,7 @@ func (m *MITM) handleMessage(msg pgproto3.FrontendMessage) error {
 }
 
 func (m *MITM) onQuery(query string) error {
-	queryStatements, err := sqlparser.ExtractQueryStatements(query)
+	queryStatements, err := sql.ExtractQueryStatements(query)
 	if err != nil {
 		m.logger.Errorf("extract query statements: %s", err)
 		return nil
@@ -336,7 +336,7 @@ func (m *MITM) onQuery(query string) error {
 		data = m.metadata.Copy()
 		for _, statement := range queryStatements {
 			data.QueryStatements = append(data.QueryStatements, metadata.QueryStatement{
-				StatementType: sqlparser.StringByStatementType[statement.Type],
+				StatementType: sql.StringByStatementType[statement.Type],
 				Table:         statement.Table,
 				Column:        statement.Column,
 			})

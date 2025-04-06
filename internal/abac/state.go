@@ -2,8 +2,6 @@ package abac
 
 import (
 	"time"
-
-	"ssh-db-proxy/internal/sqlparser"
 )
 
 type optional[T any] struct {
@@ -16,11 +14,11 @@ type State struct {
 	IP               optional[string]
 	DatabaseName     optional[string]
 	Time             optional[time.Time]
-	QueryStatements  []sqlparser.QueryStatement
+	QueryStatements  []sql.QueryStatement
 }
 
 func (s *State) Copy() *State {
-	queryStatements := make([]sqlparser.QueryStatement, len(s.QueryStatements))
+	queryStatements := make([]sql.QueryStatement, len(s.QueryStatements))
 	copy(queryStatements, s.QueryStatements)
 	return &State{
 		DatabaseUsername: s.DatabaseUsername,

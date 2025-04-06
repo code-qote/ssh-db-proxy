@@ -6,8 +6,6 @@ import (
 	"net"
 	"regexp"
 	"time"
-
-	"ssh-db-proxy/internal/sqlparser"
 )
 
 type Action int
@@ -381,14 +379,14 @@ type QueryCondition struct {
 	ColumnRegexps []string
 	Strict        bool
 
-	statementType sqlparser.StatementType
+	statementType sql.StatementType
 	tableRegexps  []*regexp.Regexp
 	columnRegexps []*regexp.Regexp
 }
 
 func (c *QueryCondition) Init() error {
 	if c.StatementType != "" {
-		typ, ok := sqlparser.StatementTypeByString[c.StatementType]
+		typ, ok := sql.StatementTypeByString[c.StatementType]
 		if !ok {
 			return fmt.Errorf("invalid statement type: %s", c.StatementType)
 		}
@@ -413,7 +411,7 @@ func (c *QueryCondition) Init() error {
 
 func (c *QueryCondition) Matches(state State) bool {
 	for _, statement := range state.QueryStatements {
-		if c.statementType != sqlparser.NoOp {
+		if c.statementType != sql.NoOp {
 			if statement.Type != c.statementType {
 				continue
 			}
