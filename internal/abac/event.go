@@ -2,6 +2,8 @@ package abac
 
 import (
 	"time"
+
+	"ssh-db-proxy/internal/sql"
 )
 
 type Event = func(state *State) error

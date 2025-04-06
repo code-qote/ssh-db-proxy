@@ -6,6 +6,8 @@ import (
 	"net"
 	"regexp"
 	"time"
+
+	"ssh-db-proxy/internal/sql"
 )
 
 type Action int
