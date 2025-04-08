@@ -18,9 +18,9 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"ssh-db-proxy/internal/abac"
-	"ssh-db-proxy/internal/auditor"
 	"ssh-db-proxy/internal/certissuer"
 	"ssh-db-proxy/internal/metadata"
+	"ssh-db-proxy/internal/notifier"
 	"ssh-db-proxy/internal/sql"
 )
 
@@ -50,15 +50,15 @@ type MITM struct {
 	certIssuer *certissuer.CertIssuer
 	caCertPool *x509.CertPool
 
-	auditor auditor.Auditor
-	abac    *abac.ABAC
+	notifier *notifier.Notifier
+	abac     *abac.ABAC
 
 	logger *zap.SugaredLogger
 
 	isHalfClosed atomic.Bool
 }
 
-func NewMITM(metadata metadata.Metadata, users []string, conn net.Conn, targetHost string, targetPort uint32, certIssuer *certissuer.CertIssuer, caCertPool *x509.CertPool, auditor auditor.Auditor, abac *abac.ABAC, logger *zap.SugaredLogger) (*MITM, error) {
+func NewMITM(metadata metadata.Metadata, users []string, conn net.Conn, targetHost string, targetPort uint32, certIssuer *certissuer.CertIssuer, caCertPool *x509.CertPool, notifier *notifier.Notifier, abac *abac.ABAC, logger *zap.SugaredLogger) (*MITM, error) {
 	if logger == nil {
 		logger = zap.NewNop().Sugar()
 	}
@@ -70,7 +70,7 @@ func NewMITM(metadata metadata.Metadata, users []string, conn net.Conn, targetHo
 		serverPort: targetPort,
 		certIssuer: certIssuer,
 		caCertPool: caCertPool,
-		auditor:    auditor,
+		notifier:   notifier,
 		abac:       abac,
 		logger:     logger,
 	}
@@ -163,13 +163,13 @@ func (m *MITM) receiveStartupMessage() (map[string]string, error) {
 		case *pgproto3.StartupMessage:
 			msgV := *msg
 			go pprof.Do(context.Background(), pprof.Labels("name", "on-startup-message-event"), func(ctx context.Context) {
-				m.auditor.OnStartupMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
+				m.notifier.OnStartupMessage(msgV, m.metadata)
 			})
 			return msg.Parameters, nil
 		case *pgproto3.SSLRequest:
 			msgV := *msg
 			go pprof.Do(context.Background(), pprof.Labels("name", "on-ssl-request-event"), func(ctx context.Context) {
-				m.auditor.OnSSLRequest(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
+				m.notifier.OnSSLRequest(msgV, m.metadata)
 			})
 			if _, err := m.backend.Write([]byte{notUseSSL}); err != nil {
 				return nil, fmt.Errorf("write SSL request: %w", err)
@@ -177,7 +177,7 @@ func (m *MITM) receiveStartupMessage() (map[string]string, error) {
 		case *pgproto3.GSSEncRequest:
 			msgV := *msg
 			go pprof.Do(context.Background(), pprof.Labels("name", "on-gss-enc-request-event"), func(ctx context.Context) {
-				m.auditor.OnGSSEncRequest(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
+				m.notifier.OnGSSEncRequest(msgV, m.metadata)
 			})
 			if _, err := m.backend.Write([]byte{notUseSSL}); err != nil {
 				return nil, fmt.Errorf("write SSL request: %w", err)
@@ -185,7 +185,7 @@ func (m *MITM) receiveStartupMessage() (map[string]string, error) {
 		case *pgproto3.CancelRequest:
 			msgV := *msg
 			go pprof.Do(context.Background(), pprof.Labels("name", "on-cancel-request-event"), func(ctx context.Context) {
-				m.auditor.OnCancelRequest(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
+				m.notifier.OnCancelRequest(msgV, m.metadata)
 			})
 			return nil, ErrCancelledRequest
 		default:
@@ -275,43 +275,43 @@ func (m *MITM) handleMessage(msg pgproto3.FrontendMessage) error {
 	case *pgproto3.Query:
 		msgV := *msg
 		go pprof.Do(context.Background(), pprof.Labels("name", "on-query-message-event"), func(ctx context.Context) {
-			m.auditor.OnQueryMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
+			m.notifier.OnQueryMessage(msgV, m.metadata)
 		})
 		return m.onQuery(msgV.String)
 	case *pgproto3.Parse:
 		msgV := *msg
 		go pprof.Do(context.Background(), pprof.Labels("name", "on-parse-message-event"), func(ctx context.Context) {
-			m.auditor.OnParseMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
+			m.notifier.OnParseMessage(msgV, m.metadata)
 		})
 		return m.onQuery(msgV.Query)
 	case *pgproto3.Bind:
 		msgV := *msg
 		go pprof.Do(context.Background(), pprof.Labels("name", "on-parse-message-event"), func(ctx context.Context) {
-			m.auditor.OnBindMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
+			m.notifier.OnBindMessage(msgV, m.metadata)
 		})
 		return nil
 	case *pgproto3.Sync:
 		msgV := *msg
 		go pprof.Do(context.Background(), pprof.Labels("name", "on-sync-message-event"), func(ctx context.Context) {
-			m.auditor.OnSyncMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
+			m.notifier.OnSyncMessage(msgV, m.metadata)
 		})
 		return nil
 	case *pgproto3.Execute:
 		msgV := *msg
 		go pprof.Do(context.Background(), pprof.Labels("name", "on-execute-message-event"), func(ctx context.Context) {
-			m.auditor.OnExecuteMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
+			m.notifier.OnExecuteMessage(msgV, m.metadata)
 		})
 		return nil
 	case *pgproto3.Describe:
 		msgV := *msg
 		go pprof.Do(context.Background(), pprof.Labels("name", "on-describe-message-event"), func(ctx context.Context) {
-			m.auditor.OnDescribeMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
+			m.notifier.OnDescribeMessage(msgV, m.metadata)
 		})
 		return nil
 	case *pgproto3.Terminate:
 		msgV := *msg
 		go pprof.Do(context.Background(), pprof.Labels("name", "on-terminate-message-event"), func(ctx context.Context) {
-			m.auditor.OnTerminateMessage(m.metadata.ConnectionID, m.metadata.RequestID, msgV)
+			m.notifier.OnTerminateMessage(msgV, m.metadata)
 		})
 		return ErrTerminateMessage
 	default:
@@ -345,20 +345,20 @@ func (m *MITM) onQuery(query string) error {
 		data.Query = query
 	}
 	if actions&abac.Notify > 0 {
-		m.auditor.OnNotify("query statements observed", rules, data)
+		m.notifier.OnNotify("query statements observed", rules, data)
 	}
 	if actions&abac.Disconnect > 0 {
 		if err := m.frontend.Send(&pgproto3.Terminate{}); err != nil {
 			return err
 		}
 		if actions&abac.Notify > 0 {
-			m.auditor.OnNotify("user was disconnected from database because of the query", rules, data)
+			m.notifier.OnNotify("user was disconnected from database because of the query", rules, data)
 		}
 		return ErrDisconnectUser
 	}
 	if actions&abac.NotPermit > 0 {
 		if actions&abac.Notify > 0 {
-			m.auditor.OnNotify("query was not permitted", rules, data)
+			m.notifier.OnNotify("query was not permitted", rules, data)
 		}
 		return ErrUserPermissionDenied
 	}
@@ -384,7 +384,7 @@ func (m *MITM) connectToDatabase(ctx context.Context, frontendParameters map[str
 		authError = fmt.Errorf("%w: forbidden username", ErrUserPermissionDenied)
 	}
 	go pprof.Do(context.Background(), pprof.Labels("name", "on-database-auth"), func(ctx context.Context) {
-		m.auditor.OnDatabaseAuth(m.metadata.ConnectionID, m.metadata.RequestID, user, m.serverHost, database, m.serverPort, authError)
+		m.notifier.OnDatabaseAuth(authError, m.metadata)
 	})
 	if authError != nil {
 		return authError
@@ -407,6 +407,9 @@ func (m *MITM) connectToDatabase(ctx context.Context, frontendParameters map[str
 	config.User = user
 	config.Database = database
 	config.RuntimeParams = frontendParameters
+
+	m.metadata.DatabaseName = database
+	m.metadata.DatabaseUsername = user
 
 	config.TLSConfig = &tls.Config{
 		ServerName:   m.serverHost,
@@ -439,17 +442,17 @@ func (m *MITM) observeConnection(user, database string) error {
 	actions, rules, err := m.abac.Observe(m.metadata.StateID, abac.DatabaseNameEvent(database), abac.DatabaseUsernameEvent(user))
 	if err == nil {
 		if actions&abac.Notify > 0 {
-			m.auditor.OnNotify(fmt.Sprintf("user %s connecting to %s", user, database), rules, m.metadata)
+			m.notifier.OnNotify(fmt.Sprintf("user %s connecting to %s", user, database), rules, m.metadata)
 		}
 		if actions&abac.Disconnect > 0 {
 			if actions&abac.Notify > 0 {
-				m.auditor.OnNotify(fmt.Sprintf("user %s was not permitted to connect to %s and disconnected", user, database), rules, m.metadata)
+				m.notifier.OnNotify(fmt.Sprintf("user %s was not permitted to connect to %s and disconnected", user, database), rules, m.metadata)
 			}
 			return fmt.Errorf("%w: forbidden username by administrator", ErrDisconnectUser)
 		}
 		if actions&abac.NotPermit > 0 {
 			if actions&abac.Notify > 0 {
-				m.auditor.OnNotify(fmt.Sprintf("user %s was not permitted to connect to %s", user, database), rules, m.metadata)
+				m.notifier.OnNotify(fmt.Sprintf("user %s was not permitted to connect to %s", user, database), rules, m.metadata)
 			}
 			return fmt.Errorf("%w: forbidden username by administrator", ErrUserPermissionDenied)
 		}

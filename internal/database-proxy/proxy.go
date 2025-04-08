@@ -18,10 +18,10 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"ssh-db-proxy/internal/abac"
-	"ssh-db-proxy/internal/auditor"
 	"ssh-db-proxy/internal/certissuer"
 	"ssh-db-proxy/internal/metadata"
 	"ssh-db-proxy/internal/mitm"
+	"ssh-db-proxy/internal/notifier"
 	wrapssh "ssh-db-proxy/internal/ssh"
 
 	"ssh-db-proxy/internal/config"
@@ -36,8 +36,8 @@ type DatabaseProxy struct {
 	logger    *zap.SugaredLogger
 	sshConfig *ssh.ServerConfig
 
-	auditor auditor.Auditor
-	abac    *abac.ABAC
+	notifier *notifier.Notifier
+	abac     *abac.ABAC
 
 	certIssuer         *certissuer.CertIssuer
 	databaseCACertPool *x509.CertPool
@@ -48,7 +48,7 @@ type ConnWithMetadata struct {
 	Metadata metadata.Metadata
 }
 
-func NewDatabaseProxy(config *config.Config, auditor auditor.Auditor, logger *zap.SugaredLogger) (*DatabaseProxy, error) {
+func NewDatabaseProxy(config *config.Config, auditor *notifier.Notifier, logger *zap.SugaredLogger) (*DatabaseProxy, error) {
 	if logger == nil {
 		logger = zap.NewNop().Sugar()
 	}
@@ -128,7 +128,7 @@ func NewDatabaseProxy(config *config.Config, auditor auditor.Auditor, logger *za
 		c:                  config,
 		sshConfig:          sshConfig,
 		logger:             logger,
-		auditor:            auditor,
+		notifier:           auditor,
 		abac:               a,
 		certIssuer:         certIssuer,
 		databaseCACertPool: certPool}, nil
@@ -203,7 +203,7 @@ func (proxy *DatabaseProxy) acceptConnections(ctx context.Context, listener net.
 				return
 			}
 			go pprof.Do(ctx, pprof.Labels("name", "on-connection-accept-event"), func(ctx context.Context) {
-				proxy.auditor.OnConnectionAccept(id, conn.LocalAddr().String(), conn.RemoteAddr().String())
+				proxy.notifier.OnConnectionAccept(id, conn.LocalAddr().String(), conn.RemoteAddr().String())
 			})
 			ch <- connWithMetadata
 		}
@@ -216,11 +216,11 @@ func (proxy *DatabaseProxy) observeConnection(connWithMetadata *ConnWithMetadata
 	actions, rules, err := proxy.abac.Observe(connWithMetadata.Metadata.StateID, abac.IPEvent(connWithMetadata.Conn.RemoteAddr().String()), abac.TimeEvent(time.Now()))
 	if err == nil {
 		if actions&abac.Notify > 0 {
-			proxy.auditor.OnNotify("got-connection", rules, connWithMetadata.Metadata)
+			proxy.notifier.OnNotify("got-connection", rules, connWithMetadata.Metadata)
 		}
 		if actions&abac.NotPermit > 0 || actions&abac.Disconnect > 0 {
 			if actions&abac.Notify > 0 {
-				proxy.auditor.OnNotify("not-permitted-connection", rules, connWithMetadata.Metadata)
+				proxy.notifier.OnNotify("not-permitted-connection", rules, connWithMetadata.Metadata)
 			}
 			if err := connWithMetadata.Conn.Close(); err != nil {
 				proxy.logger.Errorw("failed to close connection", "id", connWithMetadata.Metadata.ConnectionID, "err", err)
@@ -245,7 +245,7 @@ func (proxy *DatabaseProxy) handleConnection(ctx context.Context, conn ConnWithM
 			if strings.Contains(err.Error(), "use of closed network connection") {
 				err = nil
 			}
-			proxy.auditor.OnConnectionClosed(conn.Metadata.ConnectionID, err)
+			proxy.notifier.OnConnectionClosed(err, conn.Metadata)
 			proxy.abac.DeleteState(conn.Metadata.StateID)
 		})
 	}()
@@ -256,7 +256,7 @@ func (proxy *DatabaseProxy) handleConnection(ctx context.Context, conn ConnWithM
 	}
 	databaseUsers := strings.Split(databaseUsersString, ",")
 	go pprof.Do(ctx, pprof.Labels("name", "on-database-users-event"), func(ctx context.Context) {
-		proxy.auditor.OnDatabaseUsers(conn.Metadata.ConnectionID, databaseUsers)
+		proxy.notifier.OnDatabaseUsers(databaseUsers, conn.Metadata)
 	})
 
 	go ssh.DiscardRequests(reqs)
@@ -297,7 +297,7 @@ func (proxy *DatabaseProxy) handleChannel(ctx context.Context, metadata metadata
 		proxy.logger.Infow("finished request", "id", requestID)
 	}()
 	go pprof.Do(ctx, pprof.Labels("name", "on-direct-tcpip-request-event"), func(ctx context.Context) {
-		proxy.auditor.OnDirectTCPIPRequest(metadata.ConnectionID, requestID)
+		proxy.notifier.OnDirectTCPIPRequest(metadata)
 	})
 
 	ch, reqs, err := newChan.Accept()
@@ -318,7 +318,7 @@ func (proxy *DatabaseProxy) handleChannel(ctx context.Context, metadata metadata
 		ch:         ch,
 		localAddr:  localAddr,
 		remoteAddr: remoteAddr,
-	}, p.HostToConnect, p.PortToConnect, proxy.certIssuer, proxy.databaseCACertPool, proxy.auditor, proxy.abac, proxy.logger.With("name", "mitm", "connection-id", metadata.ConnectionID, "request-id", metadata.RequestID))
+	}, p.HostToConnect, p.PortToConnect, proxy.certIssuer, proxy.databaseCACertPool, proxy.notifier, proxy.abac, proxy.logger.With("name", "mitm", "connection-id", metadata.ConnectionID, "request-id", metadata.RequestID))
 	if err != nil {
 		return fmt.Errorf("create MITM: %w", err)
 	}

@@ -2,18 +2,17 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"syscall"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	"ssh-db-proxy/internal/auditor"
 	"ssh-db-proxy/internal/config"
 	"ssh-db-proxy/internal/database-proxy"
+	"ssh-db-proxy/internal/notifier"
 )
 
 func initLogger() *zap.SugaredLogger {
@@ -64,13 +63,12 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	auditor := auditor.NewDefaultAuditor(func(audit *auditor.DefaultConnectionAudit) {
-		b, err := json.Marshal(audit)
-		if err == nil {
-			os.WriteFile(fmt.Sprintf("/Users/niqote/ssh-db-proxy/dev/generated/audits/%s.json", audit.ID), b, 0644)
-		}
-	})
-	proxy, err := database_proxy.NewDatabaseProxy(conf, auditor, logger)
+	notif, err := notifier.New(conf.Notifier, logger.With("name", "notifier"))
+	if err != nil {
+		logger.Fatal(err)
+	}
+
+	proxy, err := database_proxy.NewDatabaseProxy(conf, notif, logger)
 	if err != nil {
 		logger.Fatal(err)
 	}
@@ -78,8 +76,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	go pprof.Do(ctx, pprof.Labels("name", "notifier"), func(ctx context.Context) {
+		logger.Error(notif.Serve())
+	})
+
 	logger.Infof("tunnel serves...")
 	if err := proxy.Serve(ctx); err != nil {
 		logger.Error(err)
 	}
+	logger.Fatal(notif.Shutdown(context.Background()))
 }

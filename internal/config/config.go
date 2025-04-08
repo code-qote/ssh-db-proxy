@@ -27,6 +27,7 @@ type Config struct {
 	ABACRulesConfig    map[string]ABACRule                   `yaml:"abac_rules"`
 	ABACRules          atomic.Pointer[map[string]*abac.Rule] `yaml:"-"`
 	HotReload          HotReload                             `yaml:"hot_reload"`
+	Notifier           NotifierConfig                        `yaml:"notifier"`
 	ConfigPath         string                                `yaml:"-"`
 
 	checksum []byte
@@ -60,6 +61,21 @@ type ABACActions struct {
 type HotReload struct {
 	Enabled bool          `yaml:"enabled"`
 	Period  time.Duration `yaml:"period"`
+}
+
+type NotifierConfig struct {
+	Enabled bool `yaml:"enabled"`
+	Listen  struct {
+		Addr string `yaml:"addr"`
+		Port uint16 `yaml:"port"`
+	} `yaml:"listen"`
+	TLS struct {
+		Enabled      bool   `yaml:"enabled"`
+		CertPath     string `yaml:"cert_path"`
+		KeyPath      string `yaml:"key_path"`
+		ClientCAPath string `yaml:"client_ca_path"`
+	}
+	Capacity uint32 `yaml:"capacity"`
 }
 
 func LoadConfig(path string, oldConfig *Config) (*Config, error) {
