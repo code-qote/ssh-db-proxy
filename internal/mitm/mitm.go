@@ -234,7 +234,6 @@ func (m *MITM) proxyClientToServer() error {
 				}
 				return ErrDisconnectUser
 			}
-			fmt.Println(err)
 		}
 		if err := m.frontend.Send(msg); err != nil {
 			return fmt.Errorf("send to server: %w", err)
