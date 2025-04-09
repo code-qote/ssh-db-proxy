@@ -128,7 +128,6 @@ func (m *MITM) Proxy(ctx context.Context) error {
 	if disconnect {
 		return ErrDisconnectUser
 	}
-	fmt.Println("LOOOOOOL")
 	return nil
 }
 
