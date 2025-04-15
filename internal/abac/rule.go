@@ -5,6 +5,7 @@ import (
 	"math"
 	"net"
 	"regexp"
+	"strings"
 	"time"
 
 	"ssh-db-proxy/internal/sql"
@@ -133,6 +134,12 @@ func (c *DatabaseUsernameCondition) Init() error {
 	}
 	c.regexps = make([]*regexp.Regexp, 0, len(c.Regexps))
 	for _, reg := range c.Regexps {
+		if !strings.HasPrefix(reg, "^") {
+			reg = "^" + reg
+		}
+		if !strings.HasSuffix(reg, "$") {
+			reg = reg + "$"
+		}
 		compiled, err := regexp.Compile(reg)
 		if err != nil {
 			return err
@@ -168,6 +175,12 @@ func (c *DatabaseNameCondition) Init() error {
 	}
 	c.regexps = make([]*regexp.Regexp, 0, len(c.Regexps))
 	for _, reg := range c.Regexps {
+		if !strings.HasPrefix(reg, "^") {
+			reg = "^" + reg
+		}
+		if !strings.HasSuffix(reg, "$") {
+			reg = reg + "$"
+		}
 		compiled, err := regexp.Compile(reg)
 		if err != nil {
 			return err

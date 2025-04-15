@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -67,7 +69,12 @@ func main() {
 				fmt.Println(err)
 				continue
 			}
-			fmt.Println(string(data))
+			var prettyJSON bytes.Buffer
+			if err := json.Indent(&prettyJSON, data, "", "\t"); err != nil {
+				fmt.Println(err)
+				continue
+			}
+			fmt.Println(prettyJSON.String())
 			resp.Body.Close()
 		}
 	}

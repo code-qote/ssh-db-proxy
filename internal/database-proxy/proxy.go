@@ -196,11 +196,13 @@ func (proxy *DatabaseProxy) acceptConnections(ctx context.Context, listener net.
 					if errors.Is(err, mitm.ErrDisconnectUser) {
 						connWithMetadata.Conn.Close()
 					}
-					return
 				}
 			})
 			if err := proxy.observeConnection(&connWithMetadata); err != nil {
-				return
+				if errors.Is(err, mitm.ErrDisconnectUser) {
+					connWithMetadata.Conn.Close()
+				}
+				continue
 			}
 			go pprof.Do(ctx, pprof.Labels("name", "on-connection-accept-event"), func(ctx context.Context) {
 				proxy.notifier.OnConnectionAccept(id, conn.LocalAddr().String(), conn.RemoteAddr().String())
