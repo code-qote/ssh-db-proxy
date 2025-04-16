@@ -47,6 +47,7 @@ var validWeekdays = map[string]time.Weekday{
 type Condition interface {
 	Init() error
 	Matches(state) bool
+	IsNot() bool
 }
 
 type Rule struct {
@@ -72,7 +73,7 @@ func (c *Rule) Matches(state state) (Action, error) {
 	}
 	matches := true
 	for _, condition := range c.Conditions {
-		matches = matches && condition.Matches(state)
+		matches = matches && (condition.Matches(state) != condition.IsNot())
 	}
 	if matches {
 		return c.Actions, nil
@@ -81,6 +82,7 @@ func (c *Rule) Matches(state state) (Action, error) {
 }
 
 type IPCondition struct {
+	Not     bool     `yaml:"not"`
 	Subnets []string `yaml:"subnets"`
 	subnets []*net.IPNet
 }
@@ -98,6 +100,10 @@ func (c *IPCondition) Init() error {
 		c.subnets = append(c.subnets, cidr)
 	}
 	return nil
+}
+
+func (c *IPCondition) IsNot() bool {
+	return c.Not
 }
 
 func (c *IPCondition) Matches(state state) bool {
@@ -124,6 +130,7 @@ func (c *IPCondition) Matches(state state) bool {
 }
 
 type DatabaseUsernameCondition struct {
+	Not     bool     `yaml:"not"`
 	Regexps []string `yaml:"regexps"`
 	regexps []*regexp.Regexp
 }
@@ -149,6 +156,10 @@ func (c *DatabaseUsernameCondition) Init() error {
 	return nil
 }
 
+func (c *DatabaseUsernameCondition) IsNot() bool {
+	return c.Not
+}
+
 func (c *DatabaseUsernameCondition) Matches(state state) bool {
 	if c == nil {
 		return false
@@ -165,6 +176,7 @@ func (c *DatabaseUsernameCondition) Matches(state state) bool {
 }
 
 type DatabaseNameCondition struct {
+	Not     bool     `yaml:"not"`
 	Regexps []string `yaml:"regexps"`
 	regexps []*regexp.Regexp
 }
@@ -190,6 +202,10 @@ func (c *DatabaseNameCondition) Init() error {
 	return nil
 }
 
+func (c *DatabaseNameCondition) IsNot() bool {
+	return c.Not
+}
+
 func (c *DatabaseNameCondition) Matches(state state) bool {
 	if c == nil {
 		return false
@@ -206,6 +222,7 @@ func (c *DatabaseNameCondition) Matches(state state) bool {
 }
 
 type TimeCondition struct {
+	Not      bool       `yaml:"not"`
 	Year     []Interval `yaml:"year"`
 	Month    []string   `yaml:"month"`
 	Day      []Interval `yaml:"day"`
@@ -290,6 +307,10 @@ func (c *TimeCondition) Init() error {
 		}
 	}
 	return nil
+}
+
+func (c *TimeCondition) IsNot() bool {
+	return c.Not
 }
 
 func (c *TimeCondition) Matches(state state) bool {
@@ -389,6 +410,7 @@ func (c *TimeCondition) Matches(state state) bool {
 }
 
 type QueryCondition struct {
+	Not           bool     `yaml:"not"`
 	StatementType string   `yaml:"statement_type"`
 	TableRegexps  []string `yaml:"table_regexps"`
 	ColumnRegexps []string `yaml:"column_regexps"`
@@ -422,6 +444,10 @@ func (c *QueryCondition) Init() error {
 		c.columnRegexps = append(c.columnRegexps, re)
 	}
 	return nil
+}
+
+func (c *QueryCondition) IsNot() bool {
+	return c.Not
 }
 
 func (c *QueryCondition) Matches(state state) bool {

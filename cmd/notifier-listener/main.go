@@ -74,7 +74,10 @@ func main() {
 				fmt.Println(err)
 				continue
 			}
-			fmt.Println(prettyJSON.String())
+			res := prettyJSON.String()
+			if res != "[]" {
+				fmt.Println(res)
+			}
 			resp.Body.Close()
 		}
 	}

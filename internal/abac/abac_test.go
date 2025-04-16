@@ -166,4 +166,25 @@ func TestABAC(t *testing.T) {
 		require.Equal(t, Notify|NotPermit|Disconnect, actions)
 		require.ElementsMatch(t, names, []string{"rule1", "rule2"})
 	})
+
+	t.Run("not-rule", func(t *testing.T) {
+		rules := map[string]*Rule{
+			"rule1": {
+				Conditions: []Condition{&DatabaseNameCondition{Not: true, Regexps: []string{"a.*"}}},
+				Actions:    Notify | NotPermit,
+			},
+		}
+		abac, err := New(rules)
+		require.NoError(t, err)
+
+		stateID := abac.NewState(nil)
+		actions, names, err := abac.Observe(stateID, DatabaseNameEvent("abracadabra"))
+		require.NoError(t, err)
+		require.Zero(t, actions)
+		require.Empty(t, names)
+
+		actions, names, err = abac.Observe(stateID, DatabaseNameEvent("bbbbb"))
+		require.Equal(t, Notify|NotPermit, actions)
+		require.ElementsMatch(t, names, []string{"rule1"})
+	})
 }
