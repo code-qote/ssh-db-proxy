@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"ssh-db-proxy/internal/abac"
+	"ssh-db-proxy/internal/buffered"
 	"ssh-db-proxy/internal/certissuer"
 	"ssh-db-proxy/internal/metadata"
 	"ssh-db-proxy/internal/notifier"
@@ -427,7 +428,7 @@ func (m *MITM) connectToDatabase(ctx context.Context, frontendParameters map[str
 	}
 
 	m.frontend = &Frontend{
-		Conn:              hijackedConn.Conn,
+		Conn:              buffered.NewConn(hijackedConn.Conn, hijackedConn.Conn.LocalAddr(), hijackedConn.Conn.RemoteAddr()),
 		Frontend:          pgproto3.NewFrontend(pgproto3.NewChunkReader(hijackedConn.Conn), hijackedConn.Conn),
 		ProcessID:         hijackedConn.PID,
 		SecretKey:         hijackedConn.SecretKey,

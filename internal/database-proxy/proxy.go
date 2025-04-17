@@ -18,6 +18,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"ssh-db-proxy/internal/abac"
+	"ssh-db-proxy/internal/buffered"
 	"ssh-db-proxy/internal/certissuer"
 	"ssh-db-proxy/internal/metadata"
 	"ssh-db-proxy/internal/mitm"
@@ -316,11 +317,7 @@ func (proxy *DatabaseProxy) handleChannel(ctx context.Context, metadata metadata
 
 	go ssh.DiscardRequests(reqs)
 
-	m, err := mitm.NewMITM(metadata, databaseUsers, &forwardChannel{
-		ch:         ch,
-		localAddr:  localAddr,
-		remoteAddr: remoteAddr,
-	}, p.HostToConnect, p.PortToConnect, proxy.certIssuer, proxy.databaseCACertPool, proxy.notifier, proxy.abac, proxy.logger.With("name", "mitm", "connection-id", metadata.ConnectionID, "request-id", metadata.RequestID))
+	m, err := mitm.NewMITM(metadata, databaseUsers, buffered.NewConn(ch, localAddr, remoteAddr), p.HostToConnect, p.PortToConnect, proxy.certIssuer, proxy.databaseCACertPool, proxy.notifier, proxy.abac, proxy.logger.With("name", "mitm", "connection-id", metadata.ConnectionID, "request-id", metadata.RequestID))
 	if err != nil {
 		return fmt.Errorf("create MITM: %w", err)
 	}

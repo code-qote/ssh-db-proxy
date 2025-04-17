@@ -113,9 +113,18 @@ func (c *IPCondition) Matches(state state) bool {
 	if !state.ip.set {
 		return false
 	}
-	ipAddr, err := net.ResolveIPAddr("ip6", state.ip.value)
+
+	ip, _, err := net.SplitHostPort(state.ip.value)
 	if err != nil {
-		ipAddr, err = net.ResolveIPAddr("ip", state.ip.value)
+		if strings.Contains(err.Error(), "missing port in address") {
+			ip = state.ip.value
+		}
+		return false
+	}
+
+	ipAddr, err := net.ResolveIPAddr("ip6", ip)
+	if err != nil {
+		ipAddr, err = net.ResolveIPAddr("ip", ip)
 		if err != nil {
 			return false
 		}
