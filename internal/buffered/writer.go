@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	bufferSize  = 128 * 1024 // 128kb
-	flushTimout = time.Millisecond
+	bufferSize   = 128 * 1024 // 128kb
+	flushTimeout = time.Millisecond
 )
 
 type CloserReadWriter interface {
@@ -52,7 +52,7 @@ func NewConn(conn CloserReadWriter, localAddr, remoteAddr net.Addr) *Conn {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(flushTimout):
+			case <-time.After(flushTimeout):
 				f.wMu.Lock()
 				f.wBuffer.Flush()
 				f.wMu.Unlock()
