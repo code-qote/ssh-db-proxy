@@ -25,7 +25,6 @@ type Conn struct {
 	wMu     sync.Mutex
 	wBuffer *bufio.Writer
 
-	rMu     sync.Mutex
 	rBuffer *bufio.Reader
 
 	ctx    context.Context
@@ -38,7 +37,7 @@ type Conn struct {
 
 func NewConn(conn CloserReadWriter, localAddr, remoteAddr net.Addr) *Conn {
 	ctx, cancel := context.WithCancel(context.Background())
-	f := &Conn{
+	c := &Conn{
 		wBuffer:    bufio.NewWriterSize(conn, bufferSize),
 		rBuffer:    bufio.NewReaderSize(conn, bufferSize),
 		conn:       conn,
@@ -53,13 +52,13 @@ func NewConn(conn CloserReadWriter, localAddr, remoteAddr net.Addr) *Conn {
 			case <-ctx.Done():
 				return
 			case <-time.After(flushTimeout):
-				f.wMu.Lock()
-				f.wBuffer.Flush()
-				f.wMu.Unlock()
+				c.wMu.Lock()
+				c.wBuffer.Flush()
+				c.wMu.Unlock()
 			}
 		}
 	})
-	return f
+	return c
 }
 
 func (c *Conn) Read(b []byte) (n int, err error) {
