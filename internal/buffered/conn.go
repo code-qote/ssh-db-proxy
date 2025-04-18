@@ -1,18 +1,9 @@
 package buffered
 
 import (
-	"bufio"
-	"context"
 	"io"
 	"net"
-	"runtime/pprof"
-	"sync"
 	"time"
-)
-
-const (
-	bufferSize   = 128 * 1024 // 128kb
-	flushTimeout = time.Millisecond
 )
 
 type CloserReadWriter interface {
@@ -22,62 +13,31 @@ type CloserReadWriter interface {
 }
 
 type Conn struct {
-	wMu     sync.Mutex
-	wBuffer *bufio.Writer
-
-	rBuffer *bufio.Reader
-
-	ctx    context.Context
-	cancel context.CancelFunc
-
 	conn       CloserReadWriter
 	localAddr  net.Addr
 	remoteAddr net.Addr
 }
 
 func NewConn(conn CloserReadWriter, localAddr, remoteAddr net.Addr) *Conn {
-	ctx, cancel := context.WithCancel(context.Background())
 	c := &Conn{
-		wBuffer:    bufio.NewWriterSize(conn, bufferSize),
-		rBuffer:    bufio.NewReaderSize(conn, bufferSize),
 		conn:       conn,
-		ctx:        ctx,
-		cancel:     cancel,
 		localAddr:  localAddr,
 		remoteAddr: remoteAddr,
 	}
-	go pprof.Do(ctx, pprof.Labels("name", "forward-channel"), func(ctx context.Context) {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(flushTimeout):
-				c.wMu.Lock()
-				c.wBuffer.Flush()
-				c.wMu.Unlock()
-			}
-		}
-	})
 	return c
 }
 
 func (c *Conn) Read(b []byte) (n int, err error) {
-	n, err = c.rBuffer.Read(b)
+	n, err = c.conn.Read(b)
 	return
 }
 
 func (c *Conn) Write(b []byte) (n int, err error) {
-	c.wMu.Lock()
-	n, err = c.wBuffer.Write(b)
-	c.wMu.Unlock()
+	n, err = c.conn.Write(b)
 	return
 }
 
 func (c *Conn) Close() error {
-	c.wMu.Lock()
-	defer c.wMu.Unlock()
-	c.wBuffer.Flush()
-	c.cancel()
 	return c.conn.Close()
 }
 

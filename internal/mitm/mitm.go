@@ -10,6 +10,7 @@ import (
 	"net"
 	"runtime/pprof"
 	"slices"
+	"strings"
 	"sync/atomic"
 
 	"github.com/jackc/pgconn"
@@ -18,7 +19,6 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"ssh-db-proxy/internal/abac"
-	"ssh-db-proxy/internal/buffered"
 	"ssh-db-proxy/internal/certissuer"
 	"ssh-db-proxy/internal/metadata"
 	"ssh-db-proxy/internal/notifier"
@@ -28,6 +28,8 @@ import (
 const (
 	txStatusIdle = 'I'
 	notUseSSL    = 'N'
+
+	bufferSize = 512 * 1024 // 512kb
 )
 
 var (
@@ -247,26 +249,20 @@ func (m *MITM) proxyServerToClient() error {
 		m.frontend.Close()
 		m.backend.Close()
 	}()
+
+	b := make([]byte, bufferSize)
 	for {
-		msg, err := m.frontend.Receive()
+		n, err := m.frontend.Read(b)
 		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) && m.isHalfClosed.Load() {
+			if errors.Is(err, io.EOF) || strings.Contains(err.Error(), "use of closed") || (errors.Is(err, io.ErrUnexpectedEOF) && m.isHalfClosed.Load()) {
 				return nil
 			}
 			return fmt.Errorf("receive from server: %w", err)
 		}
-		if isCloseMessage(msg) {
-			return nil
-		}
-		if err := m.backend.Send(msg); err != nil {
+		if _, err := m.backend.Write(b[:n]); err != nil {
 			return fmt.Errorf("send to client: %w", err)
 		}
 	}
-}
-
-func isCloseMessage(msg pgproto3.BackendMessage) bool {
-	_, ok := msg.(*pgproto3.CloseComplete)
-	return ok
 }
 
 func (m *MITM) handleMessage(msg pgproto3.FrontendMessage) error {
@@ -428,7 +424,7 @@ func (m *MITM) connectToDatabase(ctx context.Context, frontendParameters map[str
 	}
 
 	m.frontend = &Frontend{
-		Conn:              buffered.NewConn(hijackedConn.Conn, hijackedConn.Conn.LocalAddr(), hijackedConn.Conn.RemoteAddr()),
+		Conn:              hijackedConn.Conn,
 		Frontend:          pgproto3.NewFrontend(pgproto3.NewChunkReader(hijackedConn.Conn), hijackedConn.Conn),
 		ProcessID:         hijackedConn.PID,
 		SecretKey:         hijackedConn.SecretKey,
