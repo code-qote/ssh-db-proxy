@@ -434,20 +434,26 @@ func (m *MITM) connectToDatabase(ctx context.Context, frontendParameters map[str
 }
 
 func (m *MITM) observeConnection(user, database string) error {
-	actions, rules, err := m.abac.Observe(m.metadata.StateID, abac.DatabaseNameEvent(database), abac.DatabaseUsernameEvent(user))
+	actions, rules, err := m.abac.Observe(
+		m.metadata.StateID,
+		abac.DatabaseNameEvent(database),
+		abac.DatabaseUsernameEvent(user),
+	)
 	if err == nil {
 		if actions&abac.Notify > 0 {
 			m.notifier.OnNotify(fmt.Sprintf("user %s connecting to %s", user, database), rules, m.metadata)
 		}
 		if actions&abac.Disconnect > 0 {
 			if actions&abac.Notify > 0 {
-				m.notifier.OnNotify(fmt.Sprintf("user %s was not permitted to connect to %s and disconnected", user, database), rules, m.metadata)
+				m.notifier.OnNotify(fmt.Sprintf("user %s was not permitted to connect to %s and disconnected",
+					user, database), rules, m.metadata)
 			}
 			return fmt.Errorf("%w: forbidden username by administrator", ErrDisconnectUser)
 		}
 		if actions&abac.NotPermit > 0 {
 			if actions&abac.Notify > 0 {
-				m.notifier.OnNotify(fmt.Sprintf("user %s was not permitted to connect to %s", user, database), rules, m.metadata)
+				m.notifier.OnNotify(fmt.Sprintf("user %s was not permitted to connect to %s",
+					user, database), rules, m.metadata)
 			}
 			return fmt.Errorf("%w: forbidden username by administrator", ErrUserPermissionDenied)
 		}

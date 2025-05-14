@@ -1,0 +1,26 @@
+host: 0.0.0.0
+port: "8080"
+no_client_auth: false
+host_key_private_path: /etc/run/ssh_host_rsa_key
+usercapath: /etc/run/user_ca.pub
+
+hot_reload:
+  enabled: true
+  period: 4s
+
+mitm_config:
+  database_ca_path: /etc/run/tls/ca.pem
+  client_ca_path: /etc/run/tls/proxy-ca.pem
+  client_private_key_path: /etc/run/tls/proxy-ca.key
+
+notifier:
+  enabled: true
+  listen:
+    addr: "0.0.0.0"
+    port: 8081
+  capacity: 10000
+  tls:
+    enabled: true
+    cert_path: /etc/run/tls/notifier/server-cert.pem
+    key_path: /etc/run/tls/notifier/server-key.pem
+    client_ca_path: /etc/run/tls/notifier/ca-cert.pem

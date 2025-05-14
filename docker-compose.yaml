@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: db-proxy-container
+    restart: unless-stopped
+    command: --config /etc/app/config.yaml
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    volumes:
+      - ./config.yaml:/etc/app/config.yaml:ro
+
+      - ./generated/ssh_host_rsa_key:/etc/app/ssh_host_rsa_key:ro
+      - ./generated/user_ca.pub:/etc/app/user_ca.pub:ro
+
+      - ./generated/tls/ca.pem:/etc/app/tls/ca.pem:ro
+      - ./generated/tls/proxy-ca.pem:/etc/app/tls/proxy-ca.pem:ro
+      - ./generated/tls/proxy-ca.key:/etc/app/tls/proxy-ca.key:ro
+
+      - ./generated/tls/notifier/server-cert.pem:/etc/app/tls/notifier/server-cert.pem:ro
+      - ./generated/tls/notifier/server-key.pem:/etc/app/tls/notifier/server-key.pem:ro
+      - ./generated/tls/notifier/ca-cert.pem:/etc/app/tls/notifier/ca-cert.pem:ro
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
