@@ -60,7 +60,7 @@ https://github.com/user-attachments/assets/06e90c26-60cc-44ce-b594-d04ad17f324e
    ```
 6. Запустите docker образ
    ```shell
-   cd .. && \
+   cd ../.. && \
    docker-compose up --build
    ```
 
