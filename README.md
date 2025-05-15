@@ -1,7 +1,9 @@
 # SSH-DB-PROXY
 ### Прокси-модуль, обеспечивающий защищенный централизованный доступ к PostgreSQL с возможностью контроля и аудита действий пользователей.
 
-<video src="files/readme.mov" width="640" height="480" controls></video>
+
+https://github.com/user-attachments/assets/06e90c26-60cc-44ce-b594-d04ad17f324e
+
 
 ## Быстрый старт
 
