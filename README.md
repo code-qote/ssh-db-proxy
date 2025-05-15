@@ -99,7 +99,7 @@ db-proxy использует ABAC для контроля доступа и а�
 
 **Пример:**
 ```yaml
-rules:
+abac_rules:
   ip-condition:
     conditions:
       ip:
@@ -118,7 +118,7 @@ rules:
 
 **Пример:**
 ```yaml
-rules:
+abac_rules:
   database_username_condition:
     conditions:
       database_username:
@@ -138,7 +138,7 @@ rules:
 
 **Пример:**
 ```yaml
-rules:
+abac_rules:
   database_name_condition:
     conditions:
       database_name:
@@ -156,7 +156,7 @@ rules:
 
 **Пример:**
 ```yaml
-rules:
+abac_rules:
   time_condition:
     conditions:
       time:
@@ -191,7 +191,7 @@ rules:
 
 **Пример:**
 ```yaml
-rules:
+abac_rules:
   query_condition:
     conditions:
       query:
