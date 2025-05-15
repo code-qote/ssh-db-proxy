@@ -1,6 +1,8 @@
 # SSH-DB-PROXY
 ### Прокси-модуль, обеспечивающий защищенный централизованный доступ к PostgreSQL с возможностью контроля и аудита действий пользователей.
 
+<video src="files/readme.mov" width="640" height="480" controls></video>
+
 ## Быстрый старт
 
 1. Перейдите в директорию generated
@@ -65,6 +67,19 @@
 cd cmd/db-proxy && \
 go build main.go -o db-proxy
 ```
+
+## Подключение
+
+1. Установить SSH-туннель
+   ```shell
+   ssh -N -L localhost:<local-port>:<db-address>:<db-port> <user>@<db-proxy-address> -p <db-proxy-port> -i user-key
+   ```
+
+2. Подключиться к PostgreSQL
+   ```shell
+   psql --username <user> --host localhost --port <local-port> --dbname <db-name>
+   ```
+
 
 ## Получение аудитных событий
 ```shell
