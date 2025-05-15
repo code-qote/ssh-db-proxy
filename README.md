@@ -100,8 +100,10 @@ db-proxy использует ABAC для контроля доступа и а�
 **Пример:**
 ```yaml
 rules:
-  - conditions:
-      - subnets:
+  ip-condition:
+    conditions:
+      ip:
+        subnets:
           - "192.168.1.0/24"
           - "10.0.0.0/8"
         not: false  # опционально, по умолчанию false
@@ -117,14 +119,16 @@ rules:
 **Пример:**
 ```yaml
 rules:
-  - conditions:
-      - regexps:
+  database_username_condition:
+    conditions:
+      database_username:
+        regexps:
           - "admin.*"
           - "root"
         not: false
-    actions:
-       notify: true
-       not_permit: true
+        actions:
+          notify: true
+          not_permit: true
 ```
 Запрещает и уведомляет при попытках подключения с именами пользователей, начинающимися с "admin" или равными "root".
 
@@ -135,12 +139,14 @@ rules:
 **Пример:**
 ```yaml
 rules:
-  - conditions:
-      - regexps:
+  database_name_condition:
+    conditions:
+      database_name:
+        regexps:
           - "production_.*"
         not: true
     actions:
-       not_permit: true
+      not_permit: true
 ```
 Запрещает доступ к любой базе данных, кроме тех, которые начинаются с "production_".
 
@@ -151,19 +157,21 @@ rules:
 **Пример:**
 ```yaml
 rules:
-  - conditions:
-      - year:
-          - from: 2023
-            to: 2024
+  time_condition:
+    conditions:
+      time:
+        year:
+          from: 2023
+          to: 2024
         month:
           - "january"
           - "december"
         day:
-          - from: 1
-            to: 15
+          from: 1
+          to: 15
         hour:
-          - from: 9
-            to: 17
+          from: 9
+          to: 17
         weekday:
           - "monday"
           - "tuesday"
@@ -172,8 +180,8 @@ rules:
           - "friday"
         location: "Europe/London"
         not: false
-    actions:
-       not_permit: true
+        actions:
+          not_permit: true
 ```
 Отключает пользователей, которые пытаются получить доступ в рабочие дни с 9:00 до 17:00 в первой половине января или декабря 2023-2024 годов (по лондонскому времени).
 
@@ -184,8 +192,10 @@ rules:
 **Пример:**
 ```yaml
 rules:
-  - conditions:
-      - statement_type: "UPDATE"
+  query_condition:
+    conditions:
+      query:
+        statement_type: "UPDATE"
         table_regexps:
           - "user.*"
         column_regexps:
@@ -207,40 +217,3 @@ rules:
 - **notify**: Отправляет уведомление
 - **not_permit**: Запрещает выполнение запроса
 - **disconnect**: Отключает пользователя
-
-### Полный пример конфигурации
-
-```yaml
-rules:
-  - conditions:
-      - subnets:
-          - "192.168.2.0/24"
-        not: true
-      - regexps:
-          - "admin"
-        not: false
-    actions:
-       notify: true
-       not_permit: true
-       disconnect: true
-  
-  - conditions:
-      - statement_type: "DELETE"
-        table_regexps:
-          - ".*"
-        strict: true
-      - weekday:
-          - "saturday"
-          - "sunday"
-        hour:
-          - from: 0
-            to: 8
-        location: "UTC"
-    actions:
-       notify: true
-```
-Эта конфигурация:
-1. Запрещает, отключает и уведомляет при попытках доступа пользователя "admin" из любой подсети, кроме 192.168.2.0/24
-2. Запрещает выполнение DELETE-запросов в выходные дни с 00:00 до 08:00 UTC
-
-Вы можете комбинировать различные условия для создания детальных правил доступа к вашей базе данных.
